@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .config import DATA_DIR, Config
 from .endpoints import classify
-from .meter import sessions_today
+from .meter import attention_counts, sessions_today
 from .meter import tokens_of as _sum_tokens
 
 CACHE_FILE = DATA_DIR / "leaderboard.json"
@@ -42,6 +42,17 @@ class Entry:
 
     handle: str
     tokens: int = 0
+    cost_usd: float = 0.0
+    me: bool = False
+
+
+@dataclass
+class TeamEntry:
+    handle: str
+    check: int = 0
+    working: int = 0
+    waiting: int = 0
+    risk: int = 0
     cost_usd: float = 0.0
     me: bool = False
 
@@ -123,6 +134,7 @@ def payload(state: Dict[str, Any], handle: str, public: Iterable[str] = ()) -> D
     today = dict(bucket(state.get("today")))
     today["date"] = str((state.get("today") or {}).get("date", ""))
     today["sessions"] = sessions_today(state)
+    today["attention"] = attention_counts(state)
     total = dict(bucket(state.get("total")))
     total["sessions"] = int(_num((state.get("total") or {}).get("sessions")))
     return {
@@ -163,6 +175,34 @@ def parse_entries(raw: Any, scope: str, me: str) -> List[Entry]:
 def rank(entries: List[Entry]) -> List[Entry]:
     """비용 내림차순. 같으면 토큰, 그다음 핸들 — 정렬이 매 프레임 흔들리면 안 된다."""
     return sorted(entries, key=lambda e: (-e.cost_usd, -e.tokens, e.handle))
+
+
+def parse_team_entries(raw: Any, me: str) -> List[TeamEntry]:
+    """서버 응답의 오늘 관심 집계를 팀 표 행으로 정규화한다."""
+    rows = raw.get("entries") if isinstance(raw, dict) else raw
+    out: List[TeamEntry] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        handle = str(row.get("handle") or "").strip()
+        if not handle:
+            continue
+        today = row.get("today") if isinstance(row.get("today"), dict) else {}
+        attention = today.get("attention") if isinstance(today.get("attention"), dict) else {}
+        out.append(TeamEntry(
+            handle=handle,
+            check=int(_num(attention.get("check"))),
+            working=int(_num(attention.get("working"))),
+            waiting=int(_num(attention.get("waiting"))),
+            risk=int(_num(attention.get("risk"))),
+            cost_usd=cost_of(today),
+            me=handle == me,
+        ))
+    return team_rank(out)
+
+
+def team_rank(entries: List[TeamEntry]) -> List[TeamEntry]:
+    return sorted(entries, key=lambda e: (-e.check, -e.risk, -e.working, -e.cost_usd, e.handle))
 
 
 def my_entry(state: Dict[str, Any], handle: str, scope: str) -> Entry:
@@ -277,6 +317,26 @@ class Leaderboard:
             entries = rank([mine if e.me else e for e in entries])
         if not self.online:
             return entries, "혼자 달리는 중 · endpoint 를 채우면 참가"
+        status = str(cache.get("status") or "")
+        if status:
+            return entries, status
+        fetched = _num(cache.get("fetched_at"))
+        when = time.strftime("%H:%M:%S", time.localtime(fetched)) if fetched else "-"
+        return entries, f"동기화 {when} · {len(entries)}명"
+
+    def team(self, state: Dict[str, Any]) -> Tuple[List[TeamEntry], str]:
+        """(팀 현황, 상태문구). 내 행은 현재 라이브 집계로 덮어쓴다."""
+        counts = attention_counts(state)
+        mine = TeamEntry(
+            handle=self.handle, cost_usd=cost_of(state.get("today")), me=True, **counts,
+        )
+        if not self.online:
+            return [mine], "혼자 달리는 중 · endpoint 를 채우면 참가"
+        cache = self.cached()
+        entries = parse_team_entries(cache.get("entries"), self.handle)
+        entries = team_rank(entries + [mine] if not any(e.me for e in entries) else [
+            mine if e.me else e for e in entries
+        ])
         status = str(cache.get("status") or "")
         if status:
             return entries, status

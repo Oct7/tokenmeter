@@ -819,6 +819,33 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_team(args: argparse.Namespace) -> int:
+    """자체 호스팅 팀의 익명 관심 집계."""
+    config = load_config()
+    state = Meter(config, read_only=True).status()
+    board = Leaderboard(config)
+    if args.sync and board.online:
+        board.sync(state, force=True)
+    entries, _note = board.team(state)
+    if args.json:
+        print(json.dumps({
+            "schema_version": 1, "type": "team", "timestamp": time.time(),
+            "members": [{
+                "handle": entry.handle, "check": entry.check, "working": entry.working,
+                "waiting": entry.waiting, "risk": entry.risk, "cost_usd": entry.cost_usd,
+                "me": entry.me,
+            } for entry in entries],
+        }, ensure_ascii=False))
+        return 0
+    _table(
+        ["핸들", "확인", "작업", "대기", "위험", "오늘"],
+        [[entry.handle, _num(entry.check), _num(entry.working), _num(entry.waiting),
+          _num(entry.risk), _usd(entry.cost_usd)] for entry in entries],
+        right=(1, 2, 3, 4, 5),
+    )
+    return 0
+
+
 def cmd_receipt(args: argparse.Namespace) -> int:
     """최근 저장 세션의 읽기 전용 영수증."""
     state = Meter(load_config(), read_only=True).state
@@ -1236,6 +1263,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", choices=("today", "total"), default="today", help="랭킹 기준 구간")
     p.add_argument("--sync", action="store_true", help="랭킹을 지금 업로드·조회한다")
     p.add_argument("--json", action="store_true", help="공개 상태를 JSON으로 출력")
+
+    p = add("team", cmd_team, "자체 호스팅 팀 관심 현황")
+    p.add_argument("--sync", action="store_true", help="팀 현황을 지금 업로드·조회한다")
+    p.add_argument("--json", action="store_true", help="팀 현황을 JSON으로 출력")
 
     p = add("receipt", cmd_receipt, "최근 세션 영수증")
     p.add_argument("--format", choices=("text", "markdown", "json"), default="text",

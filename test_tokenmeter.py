@@ -766,7 +766,16 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
             "plans": {"subscription": {"totals": {"cost_usd": 9.0, "calls": 7}, "sessions": 2}},
             "services": {"claude-code": {"totals": {"cost_usd": 9.0, "calls": 7}, "sessions": 2}},
             "projects": {"secret-client": {"totals": {"cost_usd": 1.0}}},
-            "sessions": {"claude-code/s1": {"last_seen": time.time()}},
+            "sessions": {
+                "codex/s": {
+                    "service": "codex", "project": "secret-project", "last_seen": time.time(),
+                    "ctx": 190_000, "ctx_win": 200_000, "totals": {"cost_usd": 1.0},
+                },
+            },
+            "live": [{
+                "service": "codex", "session_id": "s", "attention": "check",
+                "attention_at": time.time(), "cwd": "/secret/path",
+            }],
         }
         # 업로드 본문에 프로젝트명은 절대 들어가지 않는다
         body = payload(state, "alice")
@@ -774,6 +783,11 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
                              "vendors", "plans", "clients", "endpoints"}, sorted(body)
         assert "secret-client" not in json.dumps(body, ensure_ascii=False)
         assert "projects" not in body
+        assert body["today"]["attention"] == {
+            "check": 1, "working": 0, "waiting": 0, "risk": 1,
+        }
+        raw = json.dumps(body, ensure_ascii=False)
+        assert "secret-project" not in raw and "/secret/path" not in raw and "session_id" not in raw
         # 비교 집계에 필요한 축이 전부 실린다
         assert body["models"]["claude-opus-5"]["cost_usd"] == 9.0
         assert body["models"]["claude-opus-5"]["calls"] == 7
@@ -789,11 +803,27 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
         assert [e.handle for e in got] == ["friend", "alice"]
         assert got[1].me and got[1].tokens == 150
 
+        from tokenmeter.leaderboard import parse_team_entries
+
+        team = parse_team_entries([
+            {"handle": "beta", "today": {"cost_usd": 99, "attention": {
+                "check": 1, "working": 9, "waiting": "bad", "risk": 0,
+            }}},
+            {"handle": "alpha", "today": {"attention": {"check": 1, "risk": 1}}},
+            {"handle": "legacy", "today": {"cost_usd": 2}},
+        ], "alpha")
+        assert [entry.handle for entry in team] == ["alpha", "beta", "legacy"]
+        assert team[0].me and (team[2].check, team[2].working, team[2].waiting, team[2].risk) == (0, 0, 0, 0)
+
         # endpoint 가 없으면 네트워크를 안 타고 나 혼자 나온다
         board = Leaderboard(Config(services={}, settings={}))
         assert board.online is False
         entries, note = board.board(state, "total")
         assert len(entries) == 1 and entries[0].me and entries[0].cost_usd == 9.0
+        assert "endpoint" in note
+        board._cache = {"entries": [{"handle": "stale-friend", "today": {"attention": {"check": 9}}}]}
+        team, note = board.team(state)
+        assert len(team) == 1 and team[0].me and team[0].check == 1
         assert "endpoint" in note
 
         # 설정을 읽고, 서버가 죽어 있어도 예외 없이 상태만 남긴다
@@ -806,6 +836,53 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
         assert cached["status"].startswith("동기화 실패"), cached
     finally:
         lb_mod.CACHE_FILE = saved
+
+
+def test_team_cli_outputs_allowlisted_local_entry(tmp: Path) -> None:
+    """team은 endpoint 없이도 익명 집계 한 줄만 JSON으로 낸다."""
+    from tokenmeter import cli
+
+    now = time.time()
+    state = {
+        "today": {"totals": {"cost_usd": 12.4}},
+        "sessions": {"codex/s": {
+            "service": "codex", "project": "secret-project", "last_seen": now,
+            "ctx": 190_000, "ctx_win": 200_000,
+        }},
+        "live": [{
+            "service": "codex", "session_id": "s", "attention": "check",
+            "attention_at": now, "cwd": "/secret/path",
+        }],
+    }
+
+    class LocalMeter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def status(self) -> Dict[str, Any]:
+            return state
+
+    saved_meter, saved_config = cli.Meter, cli.load_config
+    cli.Meter = LocalMeter  # type: ignore[assignment]
+    cli.load_config = lambda: Config(services={}, settings={})  # type: ignore[assignment]
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert cli.main(["team", "--sync", "--json"]) == 0
+        text_output = io.StringIO()
+        with contextlib.redirect_stdout(text_output):
+            assert cli.main(["team", "--sync"]) == 0
+    finally:
+        cli.Meter, cli.load_config = saved_meter, saved_config
+    result = json.loads(output.getvalue())
+    assert result["schema_version"] == 1 and result["type"] == "team"
+    assert result["members"] == [{
+        "handle": result["members"][0]["handle"], "check": 1, "working": 0,
+        "waiting": 0, "risk": 1, "cost_usd": 12.4, "me": True,
+    }]
+    assert "secret-project" not in output.getvalue() and "/secret/path" not in output.getvalue()
+    assert "핸들" in text_output.getvalue() and "확인" in text_output.getvalue()
+    assert "endpoint" not in text_output.getvalue()
 
 
 def test_cost_usd(tmp: Path) -> None:
