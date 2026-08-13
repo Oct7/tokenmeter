@@ -28,6 +28,8 @@ MARKER = f'"{HOOK_SCRIPT}"'  # 우리 엔트리 식별자 (부분 경로가 아�
 LEGACY_MARKERS = (
     f'"{ROOT / "src" / "hook.py"}"',
     f'"{ROOT / "tokenpet" / "hook.py"}"',
+    '/tokenpet/hook.py"',
+    '\\tokenpet\\hook.py"',
 )
 PLUGIN_MARKER = "tokenmeter:generated"  # 우리가 만든 플러그인 파일인지 확인하는 마커
 LEGACY_PLUGIN_MARKER = "tokenpet:generated"

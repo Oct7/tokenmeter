@@ -1093,6 +1093,32 @@ def test_installer_upgrades_legacy_entry(tmp: Path) -> None:
     assert installer.is_installed(spec)
 
 
+def test_installer_upgrades_tokenpet_entry_from_moved_checkout(tmp: Path) -> None:
+    """다른 위치에서 설치한 TokenPet 훅도 죽은 엔트리를 남기지 않고 교체한다."""
+    path = tmp / "settings.json"
+    legacy_cmd = (
+        '"/old/checkout/.venv/bin/python" '
+        '"/old/checkout/tokenpet/hook.py" claude-code UserPromptSubmit'
+    )
+    path.write_text(
+        json.dumps({"hooks": {"UserPromptSubmit": [
+            {"matcher": "", "hooks": [{"type": "command", "command": legacy_cmd, "timeout": 5}]}
+        ]}}),
+        encoding="utf-8",
+    )
+    spec = ServiceSpec(
+        name="claude-code",
+        label="Claude Code",
+        install=InstallSpec(target="claude_json", path=path, events=["UserPromptSubmit"]),
+    )
+
+    installer.install(Config(services={"claude-code": spec}, settings={}))
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert len(entries) == 1, f"옮기기 전 죽은 훅이 남았다: {entries}"
+    assert entries[0]["command"] == installer.hook_command("claude-code", "UserPromptSubmit")
+
+
 # ── 컨텍스트 · 캐시 절감 · 단가 오버라이드 · 유휴 알림 ──────────────────────
 
 
