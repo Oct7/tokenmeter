@@ -1,0 +1,226 @@
+# TokenMeter 서비스 레지스트리
+#
+# 여기에 서비스를 추가하면 (1) 훅 자동 설치 (2) 토큰 자동 측정이 함께 동작합니다.
+# 코드 수정 없이 YAML만 편집하면 됩니다.
+#
+# 사용자 오버라이드: ~/.config/tokenmeter/services.yaml (같은 구조, 깊은 병합)
+#
+# ── 필드 설명 ────────────────────────────────────────────────────────────
+#  enabled              : false 면 감시/설치 모두 건너뜀
+#  roots                : 로그가 쌓이는 디렉토리들 (~ 확장됨). 없는 경로는 무시
+#  patterns             : roots 하위에서 감시할 glob
+#  format               : jsonl (한 줄 = 한 레코드) | json (파일 전체 = 한 레코드)
+#  match                : {dot.path: value} 전부 일치하는 레코드만 사용 (생략 = 전부)
+#  mode                 : delta      = 레코드 값이 그 자체로 증가분
+#                         cumulative = 레코드 값이 누적치 → 직전값과의 차이만 반영
+#  key                  : 중복 제거/누적 기준 키의 dot.path. 생략하면 파일 경로가 키
+#  fields               : 토큰 4종의 dot.path (없으면 생략 가능)
+#  input_includes_cache : true 면 input 에서 cache_read 를 빼서 순수 입력 계산
+#  ctx_tokens           : 지금 컨텍스트에 차 있는 토큰의 dot.path (세션 줄의 ctx%).
+#                         생략하면 레코드의 input+cache_read+cache_write 로 본다.
+#                         **mode: cumulative 인 서비스는 반드시 지정한다** — 안 그러면
+#                         세션 누적치가 컨텍스트로 잡혀 ctx% 가 늘 100% 로 보인다
+#  ctx_window           : 컨텍스트 창 크기의 dot.path. 생략하면 모델 가격표의 window
+#                         (`tokenmeter price set <모델> --window N` 으로 직접 지정 가능)
+#  subagent             : 이 경로가 참이면 하위 에이전트가 남긴 레코드. 부모 sessionId 로
+#                         찍히므로 비용은 합산하되 컨텍스트는 쓰지 않고 몫만 따로 센다
+#  context              : 레코드 어디서든 발견되면 파일 단위로 기억할 값
+#                         (cwd / model / session / vendor / effort)
+#  default_model        : 모델을 못 찾았을 때 가격 계산에 쓸 기본값
+#  vendor               : 레코드에 벤더가 없을 때의 기본값 (그것도 없으면 모델명에서 추론)
+#  plan                 : subscription | api — 확실하면 여기에 못 박는다
+#  plan_probe           : plan 이 비었을 때의 판정 규칙 (로그에 결제 형태가 없어서 필요)
+#                         env  형 {env: [VAR...], if_set: api, else: subscription}
+#                         file 형 {path: ~/x.json, key: dot.path, map: {...}, default: unknown}
+#  install              : 훅 설치 방법
+#      target: claude_json     → Claude Code 스타일 hooks JSON 에 병합
+#              opencode_plugin → OpenCode 플러그인 .js 파일 생성
+#              none            → 훅 없음 (로그 감시만)
+#      path  : 대상 파일
+#      events: 등록할 이벤트 이름
+# ─────────────────────────────────────────────────────────────────────────
+
+settings:
+  # 라이브 세션이 0개가 된 뒤 데몬이 스스로 종료하기까지의 분 (0 = 종료 안 함)
+  idle_exit_minutes: 30
+  # 종료 훅을 못 받고 남은 라이브 세션 파일을 정리하는 기준 시간
+  live_ttl_hours: 6
+  # 파일 감시 폴백 폴링 주기 (초). watchdog 이벤트를 놓쳐도 이 주기로 다시 훑음
+  poll_seconds: 2.0
+  # 세션 단위 기록을 몇 개까지 남길지 (오래된 것부터 버림). 세션 수 집계의 근거가 된다
+  session_history: 500
+  # 토큰 유입이 이만큼 끊기면 "에이전트가 멈췄다" 고 알림을 한 번 띄운다 (0 = 끄기).
+  # 라이브 세션이 있을 때만, 조용해질 때마다 한 번씩만 울린다.
+  idle_notify_seconds: 90
+  overlay:
+    fps: 60
+    scale: 1.0
+    position: [40, 80]
+    # 게이지가 만땅이 되는 기준 (출력 tok/s). 세션 하나가 대략 40 tok/s 이므로
+    # 3000 이면 웬만해선 안 차고, 정말 많이 돌 때만 바늘이 끝까지 갑니다.
+    full_scale: 3000
+  # 선택형 자체 호스팅 랭킹. endpoint 가 비어 있으면 네트워크를 한 번도 건드리지 않고
+  # '나' 한 줄짜리 로컬 랭킹으로 돕니다. 채우면 그때부터 참가합니다.
+  #   올라가는 것 : 핸들 + 토큰·비용 합계 + 모델별 내역
+  #   안 올라가는 것: 프로젝트명, 경로, 세션 내용
+  leaderboard:
+    endpoint: ""          # 예: https://<프로젝트>.supabase.co/rest/v1/leaderboard
+    handle: ""            # 비우면 로그인 계정 이름
+    sync_seconds: 60      # 업로드·조회 주기
+    headers: {}           # 예: {apikey: "...", Authorization: "Bearer ...", Prefer: "resolution=merge-duplicates"}
+    # 엔드포인트는 분류해서 올립니다. 저명한 공개 엔드포인트(api.anthropic.com,
+    # api.openai.com, openrouter.ai, bedrock, vertex …)는 tokenmeter/endpoints.py 에 기본
+    # 탑재돼 이름 그대로 올라가고, 그 밖의 주소는 전부 self-hosted 한 칸으로 뭉쳐집니다.
+    # 관리자가 검증해 공개해도 된다고 판단한 호스트만 여기에 덧붙이세요.
+    public_endpoints: []  # 예: ["llm.mycorp.com"]
+
+services:
+  claude-code:
+    enabled: true
+    label: Claude Code
+    roots: ["~/.claude/projects"]
+    patterns: ["**/*.jsonl"]
+    format: jsonl
+    match:
+      type: assistant
+    mode: delta
+    key: uuid
+    input_includes_cache: false
+    fields:
+      input: message.usage.input_tokens
+      cache_read: message.usage.cache_read_input_tokens
+      cache_write: message.usage.cache_creation_input_tokens
+      output: message.usage.output_tokens
+    context:
+      cwd: cwd
+      model: message.model
+      session: sessionId
+      effort: effort
+    # 서브에이전트(subagents/agent-*.jsonl)는 부모와 같은 sessionId 로 찍힌다.
+    # 토큰/비용은 내가 낸 것이라 합산하되, 그 컨텍스트를 세션 ctx% 로 삼으면 안 된다.
+    subagent: isSidechain
+    default_model: claude-sonnet-4.6
+    vendor: anthropic
+    # 로그에는 결제 형태가 없다. Claude Code 는 API 키가 있으면 그걸 쓰고
+    # 없으면 OAuth(구독)로 붙으므로 환경변수 존재 여부가 유일한 단서다.
+    plan_probe:
+      env: [ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN]
+      if_set: api
+      else: subscription
+    # 같은 opus 라도 공식 API / Bedrock / 사내 게이트웨이는 결제처가 다르다.
+    # 훅이 세션 시작 때 찍어 둔 환경변수를 먼저 본다.
+    endpoint_probe:
+      flags:
+        CLAUDE_CODE_USE_BEDROCK: bedrock
+        CLAUDE_CODE_USE_VERTEX: vertex
+      env: [ANTHROPIC_BASE_URL]
+      default: https://api.anthropic.com
+    install:
+      target: claude_json
+      path: ~/.claude/settings.json
+      # UserPromptSubmit = 사용자 턴마다 한 번. 라이브 파일 mtime 을 갱신해
+      # 장시간 세션이 live_ttl_hours 로 잘리는 걸 막고, 데몬이 죽었으면 되살린다.
+      events: [SessionStart, UserPromptSubmit, SessionEnd]
+
+  codex:
+    enabled: true
+    label: Codex
+    roots: ["~/.codex/sessions"]
+    patterns: ["**/*.jsonl"]
+    format: jsonl
+    match:
+      payload.type: token_count
+    # total_token_usage 는 세션 누적치. 이벤트가 중복돼도 안전하도록 누적 모드 사용.
+    mode: cumulative
+    key: null # 파일(=세션) 단위 누적
+    input_includes_cache: true
+    fields:
+      input: payload.info.total_token_usage.input_tokens
+      cache_read: payload.info.total_token_usage.cached_input_tokens
+      cache_write: payload.info.total_token_usage.cache_write_input_tokens
+      # reasoning_output_tokens 는 output_tokens 의 부분집합이라 더하지 않음
+      output: payload.info.total_token_usage.output_tokens
+    # 누적 서비스라 fields 합계는 세션 총량이다 — 지금 컨텍스트는 last_token_usage 를 봐야 한다
+    ctx_tokens: payload.info.last_token_usage.total_tokens
+    ctx_window: payload.info.model_context_window
+    context:
+      cwd: payload.cwd
+      model: payload.model
+      session: payload.session_id      # session_meta 줄에서 학습
+      vendor: payload.model_provider   # 〃
+      effort: payload.effort           # turn_context 줄에서 학습
+    default_model: gpt-5.6-sol
+    vendor: openai
+    plan_probe:
+      path: ~/.codex/auth.json
+      key: auth_mode
+      map: { chatgpt: subscription, apikey: api }
+      default: unknown
+    endpoint_probe:
+      env: [OPENAI_BASE_URL]
+      path: ~/.codex/config.toml           # [model_providers.<벤더>] base_url
+      key: model_providers.{vendor}.base_url
+      # 구독(ChatGPT)과 종량제(API)는 애초에 다른 곳으로 간다
+      default:
+        subscription: https://chatgpt.com/backend-api/codex
+        api: https://api.openai.com/v1
+    install:
+      target: claude_json
+      path: ~/.codex/hooks.json
+      # Codex 는 중간 이벤트가 확인되지 않아 둘만 등록한다. 대신 생존 신호는
+      # 미터가 토큰 유입으로 찍는다(Meter._touch_live) — 이벤트에 기대지 않는다.
+      events: [SessionStart, SessionEnd]
+
+  opencode:
+    enabled: true
+    label: OpenCode
+    roots:
+      - "~/.local/share/opencode/storage/message"
+      - "~/.opencode/storage/message"
+    patterns: ["**/*.json"]
+    format: json
+    match:
+      role: assistant
+    # 메시지 파일은 생성 시점(토큰 0)과 완료 시점에 각각 쓰인다 → 누적 모드로 차이만 반영
+    mode: cumulative
+    key: id
+    input_includes_cache: false
+    fields:
+      input: tokens.input
+      cache_read: tokens.cache.read
+      cache_write: tokens.cache.write
+      output: tokens.output
+    context:
+      cwd: path.cwd
+      model: modelID
+      session: sessionID
+      vendor: providerID
+    default_model: default
+    # 프로바이더 키를 직접 넣어 쓰는 구조라 종량제로 본다 (구독 게이트웨이면 subscription 으로)
+    plan: api
+    endpoint_probe:
+      # 프로바이더마다 URL 이 다르다 → {vendor} 에 providerID 가 들어간다
+      path: ~/.config/opencode/opencode.json
+      key: provider.{vendor}.options.baseURL
+    install:
+      target: opencode_plugin
+      path: ~/.config/opencode/plugin/tokenmeter.js
+      events: [SessionStart]
+# ── 새 서비스 추가 예시 ──────────────────────────────────────────────────
+#  gemini-cli:
+#    enabled: true
+#    label: Gemini CLI
+#    roots: ["~/.gemini/tmp"]
+#    patterns: ["**/*.json"]
+#    format: json
+#    match: {type: assistant}
+#    mode: delta
+#    key: id
+#    fields:
+#      input: usage.promptTokenCount
+#      output: usage.candidatesTokenCount
+#    context: {cwd: cwd, model: model}
+#    default_model: default
+#    install: {target: none}
+#
+#  설정 후 `tokenmeter doctor gemini-cli` 로 실제 로그가 파싱되는지 확인하세요.

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN=${TOKENMETER_BIN:-tokenmeter}
+if ! command -v "$BIN" >/dev/null 2>&1; then
+  echo "TokenMeter is not installed." >&2
+  echo "Run: uv tool install git+https://github.com/Oct7/tokenmeter.git" >&2
+  exit 1
+fi
+
+exec "$BIN" "$@"

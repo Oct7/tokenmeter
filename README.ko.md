@@ -1,0 +1,122 @@
+# TokenMeter
+
+**여러 AI 코딩 에이전트가 일하는지, 기다리는지, 컨텍스트가 찼는지 한눈에.**
+
+TokenMeter는 Claude Code, Codex, OpenCode를 위한 로컬 우선 데스크톱 미터입니다. 여러 세션의 실시간 출력 속도와 컨텍스트 위험을 보여주고, 비용·히스토리를 기록하며, 토큰 흐름이 멈추면 알려줍니다.
+
+[English](README.md) · [상세 레퍼런스](docs/reference.ko.md) · [새 에이전트 추가](docs/add-service.md)
+
+```text
+┌────────────────────────────────────────────────────┐
+│ TOKENMETER                                    오늘 │
+│ 478 출력 tok/s                           ≈ $15.8599 │
+│ ██████████████░░░░░░░░░░░░░░░░░░░░░░░░           ▏ │
+│ 입력 1.2M         출력 84.0k        캐시 23.5M     │
+├────────────────────────────────────────────────────┤
+│ 라이브 세션                                         │
+│ api-server     opus-5      412/s      ctx 31%       │
+│ web-client     gpt-5.6      63/s      ctx 75%       │
+│ mobile         sonnet-5      3/s      ctx 95%  ⚠    │
+└────────────────────────────────────────────────────┘
+```
+
+## TokenMeter를 쓰는 이유
+
+- **무엇이 실제로 일하는지 확인합니다.** 지원하는 에이전트의 라이브 세션을 출력 속도순으로 보여줍니다.
+- **압축 시점을 미리 봅니다.** 컨텍스트 점유율이 70%, 90%를 넘으면 색이 바뀝니다.
+- **사용량을 로컬에서 이해합니다.** 토큰, API 환산 비용, 캐시 절감, 프로젝트, 모델, 일별 기록을 확인합니다.
+- **터미널을 계속 보지 않아도 됩니다.** 작업 중인 세션의 토큰 흐름이 멈추면 데스크톱 알림이 옵니다.
+
+TokenMeter는 로컬 에이전트 로그를 읽습니다. API 키가 필요 없고, 프롬프트 내용을 상태에 저장하지 않으며, 기본 설정에서는 네트워크 요청을 하지 않습니다.
+
+## 설치
+
+요구사항은 macOS 또는 Linux, Python 3.10 이상입니다. [uv](https://docs.astral.sh/uv/)를 사용하면 격리된 환경에 한 줄로 설치됩니다.
+
+```bash
+uv tool install git+https://github.com/Oct7/tokenmeter.git
+tokenmeter install
+```
+
+pipx를 사용해도 됩니다.
+
+```bash
+pipx install git+https://github.com/Oct7/tokenmeter.git
+tokenmeter install
+```
+
+첫 측정을 활성화합니다.
+
+1. Claude Code, Codex, OpenCode를 완전히 다시 엽니다.
+2. 새 프롬프트를 한 번 실행합니다.
+3. 오버레이가 뜨는지 확인하거나 `tokenmeter status`를 실행합니다.
+4. 보이지 않으면 `tokenmeter doctor`를 실행합니다.
+
+기존 TokenPet 훅과 로컬 데이터는 안전하게 감지해 복사합니다. 옛 파일은 삭제하지 않습니다.
+
+## 지원 에이전트
+
+| 에이전트 | 로컬 사용량 | 자동 생명주기 훅 |
+|---|---:|---:|
+| Claude Code | 지원 | 지원 |
+| Codex | 지원 | 지원 |
+| OpenCode | 지원 | 지원, 플러그인 자동 생성 |
+
+로그가 있는 다른 에이전트도 설정만으로 추가할 수 있습니다. [서비스 추가 가이드](docs/add-service.md)를 참고하세요.
+
+## 주요 명령
+
+```bash
+tokenmeter status                 # 사용량·히스토리·세션
+tokenmeter services               # 로그 감지와 훅 상태
+tokenmeter doctor                 # 파서와 설치 검증
+tokenmeter meter off              # 창만 숨기고 측정은 유지
+tokenmeter off                    # 측정을 멈추고 훅은 유지
+tokenmeter on                     # 측정 재개
+tokenmeter uninstall              # TokenMeter 훅만 제거
+```
+
+오버레이는 드래그 이동, 휠 크기 조절, `S/M/L` 표시 크기, 더블클릭 화면 전환, 우클릭 전체 메뉴를 지원합니다.
+
+## 에이전트 스킬
+
+선택형 스킬을 설치하면 호환되는 코딩 에이전트가 자연어로 TokenMeter를 조작할 수 있습니다.
+
+```bash
+npx skills add Oct7/tokenmeter -g -a claude-code
+```
+
+`/tm`, `/tm-meter`, `/tm-measure`, `/tm-doctor`가 추가됩니다.
+
+## 개인정보와 데이터
+
+- 프롬프트, 프로젝트 경로, 세션 내용은 업로드하지 않습니다.
+- macOS 상태 경로는 `~/Library/Application Support/tokenmeter`, Linux는 `${XDG_STATE_HOME:-~/.local/state}/tokenmeter`입니다.
+- 사용자 설정은 `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`에 있습니다.
+- 선택형 자체 호스팅 랭킹은 기본적으로 꺼져 있습니다. 켰을 때 전송되는 집계값은 [상세 레퍼런스](docs/reference.ko.md#글로벌-랭킹-붙이기)에 명시돼 있습니다.
+
+## 업데이트와 제거
+
+```bash
+uv tool install --force git+https://github.com/Oct7/tokenmeter.git
+tokenmeter install                # 훅의 절대 경로 갱신
+```
+
+격리 도구를 지우기 전에 훅을 먼저 제거합니다.
+
+```bash
+tokenmeter uninstall
+uv tool uninstall oct7-tokenmeter
+```
+
+## 개발
+
+```bash
+git clone https://github.com/Oct7/tokenmeter.git
+cd tokenmeter
+uv sync
+uv run python test_tokenmeter.py
+uv run tokenmeter install --dry-run
+```
+
+TokenMeter는 [MIT 라이선스](LICENSE)로 배포됩니다.

@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip build
+      - run: python -m pip install .
+      - run: python test_tokenmeter.py
+      - run: python -m tokenmeter.overlay
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - run: python -m tokenmeter.leaderboard
+      - run: python -m tokenmeter.endpoints
+      - run: python -m build

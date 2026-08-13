@@ -1,0 +1,4 @@
+# 기본 설치 의존성 (pyproject.toml 과 동일)
+PyYAML>=6.0
+PyQt6>=6.6
+watchdog>=4.0.0
