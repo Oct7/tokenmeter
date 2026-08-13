@@ -1724,6 +1724,7 @@ def test_skill_wrapper_invokes_installed_cli(tmp: Path) -> None:
 
 
 def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
+    from tokenmeter import cli
     from tokenmeter.cli import format_receipt, receipt_data
 
     state = {"sessions": {
@@ -1740,6 +1741,34 @@ def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
     assert data and data["project"] == "api" and data["money_label"] == "API 환산 가치"
     assert "API 환산 가치 $4.00" in format_receipt(data, "text")
     assert json.loads(format_receipt(data, "json"))["type"] == "receipt"
+    assert format_receipt(data, "markdown") == "\n".join([
+        "### TokenMeter 영수증", "- api · codex · gpt-5.6-sol",
+        "- 1분 · 40 토큰 · 2 호출", "- API 환산 가치 $4.00 · 캐시 절감 $2.00",
+        "- ctx 25% · 서브에이전트 25%",
+    ])
+
+    unknown = receipt_data({"sessions": {"unknown/s": {
+        "plan": "custom", "started_at": 9, "last_seen": 9, "ctx": 5, "ctx_win": 0,
+        "totals": {"cost_usd": 0},
+    }}})
+    assert unknown and unknown["money_label"] == "API 환산가"
+    assert unknown["ctx_percent"] is None and unknown["subagent_percent"] == 0.0
+    assert "ctx - · 서브에이전트 0%" in format_receipt(unknown, "text")
+
+    assert receipt_data({"sessions": {}}) is None
+    class EmptyMeter:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.state = {"sessions": {}}
+
+    saved_meter = cli.Meter
+    cli.Meter = EmptyMeter  # type: ignore[assignment]
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert cli.cmd_receipt(argparse.Namespace(format="text")) == 1
+    finally:
+        cli.Meter = saved_meter
+    assert output.getvalue().strip() == "영수증을 만들 세션이 없습니다."
 
 
 # ── 러너 ───────────────────────────────────────────────────────────────────
