@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .history import OTHER, SPAN_TITLES, SPANS, Series, load_hours, series, summary
 from .leaderboard import Entry, Leaderboard
 from .leaderboard import tokens_of as _tokens_of
+from .meter import ATTENTION_LABELS, ATTENTION_ORDER, session_views
 
 try:  # PyQt6 가 없어도 import 자체는 성공해야 한다 (CLI 가 이 모듈을 import 한다)
     from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer
@@ -67,25 +68,26 @@ PANEL_TITLES = {"board": "랭킹", "days": "일별 히스토리", "sessions": "�
 PANEL_ROWS = {"board": 5, "days": 7, "sessions": 10}  # 패널마다 필요한 줄 수가 다르다
 MARK_W = {"board": 16.0, "days": 36.0}  # 등수(1자) vs 날짜(5자)
 Row = Tuple[str, str, int, float, bool]  # (좌측 표식, 이름, 토큰, 비용, 강조)
-# 세션 줄 — (프로젝트, 모델, effort, tok/s, 벤더, 라이브, 열린시각, 누적토큰, ctx점유율, 서브몫)
-SessionRow = Tuple[str, str, str, float, str, bool, str, int, float, float]
+# 세션 줄 — (내부키, 상태, 프로젝트, 모델, effort, tok/s, 벤더, 라이브, 열린시각, 누적토큰, ctx점유율, 서브몫)
+SessionRow = Tuple[str, str, str, str, str, float, str, bool, str, int, float, float]
 WHEEL_LINE = 60.0           # 세션 목록 한 줄을 넘기는 휠 델타 (한 칸=120 → 두 줄)
 # 세션 줄의 칸 배치 — (시작, 끝, 오른쪽정렬, 글자크기). 창 폭 대비 비율이라
 # 배율/폭이 바뀌어도 같이 움직인다. 5칸이라 폭이 빠듯해 넘치는 칸은 접는다.
 # 좁은 모드의 마지막 칸은 **벤더 대신 ctx%** 다 — 벤더는 모델명으로 짐작되지만
 # 컨텍스트가 얼마나 찼는지는 다른 데서 볼 방법이 없다.
-SESSION_COLS = ((0.00, 0.28, False, 8.5), (0.28, 0.50, False, 7.5),
-                (0.50, 0.59, False, 7.5), (0.59, 0.75, True, 8.5),
-                (0.75, 0.87, True, 8.0), (0.87, 1.00, True, 8.0))
-# 확장 모드는 폭이 남으니 '열린 시각'(맨 앞)과 벤더(맨 뒤)를 함께 둔다
-SESSION_COLS_WIDE = ((0.00, 0.13, False, 8.0), (0.13, 0.35, False, 8.5),
-                     (0.35, 0.52, False, 7.5), (0.52, 0.59, False, 7.5),
-                     (0.59, 0.71, True, 8.5), (0.71, 0.79, True, 8.0),
-                     (0.79, 0.88, True, 8.0), (0.88, 1.00, True, 7.5))
+SESSION_COLS = ((0.00, 0.16, False, 8.0), (0.16, 0.45, False, 8.5),
+                (0.45, 0.65, False, 7.5), (0.65, 0.84, True, 8.5),
+                (0.84, 1.00, True, 8.0))
+# 확장 모드는 기본 다섯 칸 뒤에 기존의 세부 정보를 붙인다.
+SESSION_COLS_WIDE = ((0.00, 0.10, False, 8.0), (0.10, 0.28, False, 8.5),
+                     (0.28, 0.43, False, 7.5), (0.43, 0.55, True, 8.5),
+                     (0.55, 0.64, True, 8.0), (0.64, 0.76, False, 8.0),
+                     (0.76, 0.84, False, 7.5), (0.84, 0.92, True, 8.0),
+                     (0.92, 1.00, False, 7.5))
 CELL_PAD = 4.0
 # 세션 칸 이름 — 칸이 좁아 2~5자를 넘기면 잘린다. 값과 같은 순서/정렬로 그린다
-SESSION_HEAD = ("프로젝트", "모델", "강도", "tok/s", "ctx", "서브")
-SESSION_HEAD_WIDE = ("시각", "프로젝트", "모델", "강도", "tok/s", "ctx", "서브", "벤더")
+SESSION_HEAD = ("상태", "프로젝트", "모델", "tok/s", "ctx")
+SESSION_HEAD_WIDE = SESSION_HEAD + ("시각", "강도", "서브", "벤더")
 COLHEAD_H = 11              # 칸 이름 한 줄 높이
 CTX_WARN, CTX_HOT = 0.70, 0.90  # 컨텍스트 점유 경고선 (앰버 / 빨강)
 SUB_HOT = 0.50                  # 하위 에이전트가 세션 비용의 절반을 넘긴 지점
@@ -121,6 +123,7 @@ FG = "#E8EAF2"
 DIM = "#8B93A7"
 LINE = "#232634"
 GOLD = "#FFC53D"
+STATE_COLORS = {"check": "#FF5F6D", "working": GOLD, "waiting": DIM, "done": "#555B6C"}
 
 
 # ── 작은 헬퍼 ─────────────────────────────────────────────────────────────
@@ -553,30 +556,27 @@ class MeterWindow(QWidget):
         return rows, f"최근 {len(rows)}일 합계 {_money(spent)}"
 
     def _session_rows(self) -> Tuple[List[SessionRow], str]:
-        """세션 목록 — 프로젝트 · 모델 · effort · tok/s · 벤더, 마지막 활동 순.
-
-        지금 돌고 있는 세션이 위로 오도록 tok/s 를 먼저 본다. 라이브가 여럿일 때
-        '누가 지금 토큰을 태우고 있나' 가 이 목록을 보는 유일한 이유다.
-        """
-        book = self.status.get("sessions")
-        # 세션 id 는 레코드가 아니라 키("<서비스>/<세션>")에 있다 — 라이브 대조에 필요하다
-        recs = [(k, v) for k, v in (book or {}).items() if isinstance(v, dict)] \
-            if isinstance(book, dict) else []
-        recs.sort(key=lambda kv: (self.rates.get(kv[0], 0.0), _float(kv[1].get("last_seen"))),
-                  reverse=True)
-        live = {str(s.get("session_id") or "") for s in (self.status.get("live") or [])
-                if isinstance(s, dict)}
+        """세션 목록 — 상태를 먼저, 그 안에서 속도와 마지막 활동 순으로 표시한다."""
+        views = session_views(self.status)
+        views.sort(key=lambda row: (
+            ATTENTION_ORDER[row["attention"]],
+            -self.rates.get(row["key"], 0.0),
+            -_float(row["last_seen"]),
+        ))
         cap = self._cap("sessions")
-        self.scroll = max(0, min(self.scroll, len(recs) - cap))  # 목록이 줄면 따라 올라온다
+        self.scroll = max(0, min(self.scroll, len(views) - cap))  # 목록이 줄면 따라 올라온다
         rows: List[SessionRow] = []
-        for key, rec in recs[self.scroll:self.scroll + cap]:
+        for rec in views[self.scroll:self.scroll + cap]:
+            key = str(rec["key"])
             rows.append((
+                key,
+                str(rec["attention"]),
                 str(rec.get("project") or rec.get("service") or "(unknown)"),
                 short_model(rec.get("model")),
                 short_effort(rec.get("effort")),
                 self.rates.get(key, 0.0),
                 str(rec.get("vendor") or ""),
-                str(key).split("/", 1)[-1] in live,
+                bool(rec.get("live")),
                 _stamp(rec.get("started_at")),  # 세션이 열린 시각 (확장 모드에서만 보인다)
                 _tokens_of(rec),  # 닫힌 세션은 속도가 없다 — 그 자리에 총 사용량을 남긴다
                 ctx_ratio(rec),   # 마지막 턴의 컨텍스트 점유 (압축 임박이 여기 보인다)
@@ -584,8 +584,8 @@ class MeterWindow(QWidget):
             ))
         if not rows:
             return [], "기록된 세션 없음"
-        more = f" · {self.scroll + len(rows)}/{len(recs)}" if len(recs) > cap else ""
-        return rows, (f"세션 {len(recs)}개 기록 · 라이브 "
+        more = f" · {self.scroll + len(rows)}/{len(views)}" if len(views) > cap else ""
+        return rows, (f"세션 {len(views)}개 기록 · 라이브 "
                       f"{self.status.get('live_count', 0)}개{more}")
 
     # ── 프레임 ───────────────────────────────────────────────────────────
@@ -888,12 +888,12 @@ class MeterWindow(QWidget):
         return y + COLHEAD_H * s
 
     def _draw_session_rows(self, x: float, y: float, w: float, rows: List[SessionRow]) -> None:
-        """프로젝트 | 모델 | effort | tok/s | 벤더. 확장 모드는 앞에 열린 시각이 붙는다."""
+        """상태 | 프로젝트 | 모델 | tok/s | ctx. 확장 모드는 세부 정보를 뒤에 붙인다."""
         s, p = self.scale, self._painter
-        top = max([r[3] for r in rows] or [0.0]) or 1.0
+        top = max([r[5] for r in rows] or [0.0]) or 1.0
         wide = self.expanded
         focused = self.focus[1] if (self.focus or ("", ""))[0] == "project" else None
-        for i, (project, model, effort, rate, vendor, live, opened, tokens, ctx, sub) in enumerate(rows):
+        for i, (_key, attention, project, model, effort, rate, vendor, live, opened, tokens, ctx, sub) in enumerate(rows):
             ry = y + i * ROW_H * s
             h = (ROW_H - 3) * s
             # 속도 비례 막대 = 지금 누가 토큰을 태우는지. 다 멈춰 있으면 아무 막대도 없다
@@ -902,24 +902,25 @@ class MeterWindow(QWidget):
                            _c(KIND_COLORS["output"], 30))
             if project == focused:  # 그래프가 지금 보고 있는 줄
                 p.fillRect(QRectF(x, ry, w, h), _c(GOLD, 22))
-            if live:
-                p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(GOLD))
+            p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(STATE_COLORS[attention]))
             self._hit[f"row:{i}"] = (x, ry, w, h)
             cells = [
+                (ATTENTION_LABELS[attention], STATE_COLORS[attention], True),
                 (project, FG if live else "#C6CCDC", live),
                 (model, "#C6CCDC", False),
-                (effort, KIND_COLORS["cache_write"], False),
                 # 도는 중이면 속도, 멈춰 있으면 그 세션이 태운 총 토큰
                 (_rate(rate) or _fmt(tokens), KIND_COLORS["output"] if rate >= 0.5 else DIM, True),
                 # 컨텍스트 점유 — 창 크기를 모르는 모델은 빈칸이다
                 (f"{ctx * 100:.0f}%" if ctx > 0 else "", ctx_color(ctx), ctx >= CTX_WARN),
-                # 이 세션 비용 중 하위 에이전트 몫. 안 쓴 세션은 빈칸이다
-                (f"{sub * 100:.0f}%" if sub > 0 else "",
-                 GOLD if sub >= SUB_HOT else DIM, sub >= SUB_HOT),
             ]
-            if wide:  # 폭이 남을 때만 열린 시각과 벤더가 붙는다
-                cells.insert(0, (opened, DIM, False))
-                cells.append((vendor, DIM, False))
+            if wide:  # 폭이 남을 때만 기존 세부 정보를 뒤에 붙인다
+                cells.extend([
+                    (opened, DIM, False),
+                    (effort, KIND_COLORS["cache_write"], False),
+                    (f"{sub * 100:.0f}%" if sub > 0 else "", GOLD if sub >= SUB_HOT else DIM,
+                     sub >= SUB_HOT),
+                    (vendor, DIM, False),
+                ])
             for (text, color, bold), (a, b, right, size) in zip(
                 cells, SESSION_COLS_WIDE if wide else SESSION_COLS
             ):
@@ -974,7 +975,7 @@ class MeterWindow(QWidget):
         if not 0 <= index < len(rows):
             return
         if self.panel == "sessions":
-            focus = ("project", str(rows[index][0]))
+            focus = ("project", str(rows[index][2]))
         elif self.panel == "days":
             day = str(rows[index][0])  # 'MM-DD' 로 잘려 있다 — 연도를 되붙인다
             node = self.status.get("today")
@@ -1278,22 +1279,32 @@ def _demo() -> None:
     assert w.rate == 0.0 and w.gauge == 0.0 and w.peak <= 0.01
 
     # 오늘/누적 토글은 표시만 바꾸고, 유입 감지는 언제나 누적을 본다
+    now = time.time()
     w.status = {"today": {"date": "2026-08-11",
                           "totals": {"cost_usd": 1.0, "output_tokens": 5, "cache_saved_usd": 0.4}},
                 "total": {"totals": {"cost_usd": 9.0, "output_tokens": 50,
                                      "cache_saved_usd": 12.0}},
                 "days": {"2026-08-09": {"cost_usd": 2.0, "output_tokens": 20},
                          "2026-08-10": {"cost_usd": 3.0, "output_tokens": 30}},
-                "sessions": {"claude-code/s1": {"project": "tokenmeter", "last_seen": 1786380000.0,
+                "sessions": {"claude-code/s1": {"project": "tokenmeter", "last_seen": now - 20,
                                                 "model": "claude-opus-5", "vendor": "anthropic",
                                                 "effort": "xhigh", "started_at": 1786377600.0,
                                                 "ctx": 150_000, "ctx_win": 200_000,
                                                 "totals": {"cost_usd": 4.0, "output_tokens": 40}},
-                             "claude-code/s2": {"project": "other", "last_seen": 1786370000.0,
+                             "claude-code/s2": {"project": "other", "last_seen": now - 10,
                                                 "model": "gpt-5.6", "vendor": "openai",
-                                                "totals": {"cost_usd": 0.5, "output_tokens": 4}}},
-                "live": [{"service": "claude-code", "session_id": "s1", "updated_at": 1786380000.0}],
-                "live_count": 1}
+                                                "totals": {"cost_usd": 0.5, "output_tokens": 4}},
+                             "claude-code/s3": {"project": "waiting", "last_seen": now - 120,
+                                                "totals": {"cost_usd": 0.0, "output_tokens": 0}},
+                             "claude-code/s4": {"project": "done", "last_seen": now - 300,
+                                                "totals": {"cost_usd": 0.0, "output_tokens": 0}}},
+                "live": [{"service": "claude-code", "session_id": "s1", "attention": "check",
+                          "attention_at": now - 5},
+                         {"service": "claude-code", "session_id": "s2", "attention": "working",
+                          "attention_at": now - 10},
+                         {"service": "claude-code", "session_id": "s3", "attention": "working",
+                          "attention_at": now - 120}],
+                "live_count": 3}
     w.scope = "today"
     assert w._scoped()["cost_usd"] == 1.0 and w._totals()["output_tokens"] == 50
     w.scope = "total"
@@ -1311,13 +1322,17 @@ def _demo() -> None:
     assert rows[0][4] and rows[0][3] == 1.0 and not rows[1][4], rows
     assert "6.00" in note, note  # 1 + 3 + 2
 
-    # 세션 목록: 프로젝트 · 모델 · effort · tok/s · 벤더 · 라이브 · 열린 시각 · 누적 토큰 · ctx · 서브
+    # 세션 목록: 상태 · 프로젝트 · 모델 · tok/s · ctx. 확장 시 나머지 정보가 뒤에 붙는다.
     w.panel = "sessions"
     w.status["sessions"]["claude-code/s1"]["sub_cost"] = 1.0  # 4.0 중 1.0 = 25%
     rows, note = w._build_rows()
     opened = time.strftime("%m-%d %H:%M", time.localtime(1786377600.0))
-    assert rows[0] == ("tokenmeter", "opus-5", "xhi", 0.0, "anthropic", True, opened, 40, 0.75, 0.25), rows[0]
-    assert rows[1] == ("other", "gpt-5.6", "", 0.0, "openai", False, "", 4, 0.0, 0.0), rows[1]
+    assert SESSION_HEAD == ("상태", "프로젝트", "모델", "tok/s", "ctx")
+    assert [ATTENTION_LABELS[row[1]] for row in rows] == ["확인", "작업", "대기", "종료"], rows
+    assert rows[0] == ("claude-code/s1", "check", "tokenmeter", "opus-5", "xhi", 0.0,
+                       "anthropic", True, opened, 40, 0.75, 0.25), rows[0]
+    assert rows[1] == ("claude-code/s2", "working", "other", "gpt-5.6", "", 0.0,
+                       "openai", True, "", 4, 0.0, 0.0), rows[1]
     assert len(opened) == 11, "날짜~분까지만 — 초는 붙지 않는다"
 
     # 하위 에이전트 몫: 세션 비용에 이미 들어 있으므로 비율은 1 을 넘지 않는다
@@ -1338,7 +1353,7 @@ def _demo() -> None:
     assert w._approx()
     del w.status["plans"]
     # 멈춘 세션 줄은 속도 칸에 총 사용량이 대신 들어간다 (빈칸으로 두면 기록이 사라진다)
-    assert _rate(0.0) == "" and (_rate(0.0) or _fmt(rows[0][7])) == "40"
+    assert _rate(0.0) == "" and (_rate(0.0) or _fmt(rows[0][9])) == "40"
 
     # 세션 tok/s: 그 세션의 출력 토큰 증가분만 먹고, 유입이 끊기면 0 으로 식는다.
     # 첫 관측은 기준점이므로 이미 쌓여 있던 누적(40)이 속도로 잡히면 안 된다
@@ -1349,18 +1364,18 @@ def _demo() -> None:
     assert 29.0 < w.rates["claude-code/s1"] < 31.0, w.rates  # 600 / TAU
     assert "claude-code/s2" not in w.rates, "안 움직인 세션에 속도가 붙었다"
     rows, _ = w._build_rows()
-    assert rows[0][3] > 0 and rows[1][3] == 0.0, rows
+    assert rows[0][5] > 0 and rows[1][5] == 0.0, rows
     for _ in range(int(300.0 / dt)):
         w._advance(dt)
     assert not w.rates, w.rates
     w.status["sessions"]["claude-code/s1"]["totals"]["output_tokens"] = 40
     w._seen_out.clear()
 
-    # 지금 도는 세션이 목록 맨 위로 온다 — 마지막 활동 시각만으로는 구분이 안 된다
+    # 상태가 먼저이고 그 안에서는 지금 도는 세션이 위로 온다.
     w._track_rates()
     w.rates["claude-code/s2"] = 50.0
     rows, _ = w._build_rows()
-    assert rows[0][0] == "other", rows
+    assert rows[0][1] == "check", rows
     w.rates.clear()
 
     # 이름 줄이기: 칸이 11자쯤이라 접두사/날짜를 떼야 모델이 읽힌다
@@ -1442,7 +1457,7 @@ def _demo() -> None:
         book[f"claude-code/x{i}"] = {"project": f"p{i}", "last_seen": 1786300000.0 - i,
                                      "totals": {"output_tokens": 10, "cost_usd": 0.1}}
     w._rebuild_rows()
-    assert len(w.rows) == 10 and "16" in w.note, (len(w.rows), w.note)
+    assert len(w.rows) == 10 and "18" in w.note, (len(w.rows), w.note)
     first = w.rows[0]
     w._scroll_rows(-WHEEL_LINE * 3)  # 아래로 세 줄
     assert w.scroll == 3 and w.rows[0] != first

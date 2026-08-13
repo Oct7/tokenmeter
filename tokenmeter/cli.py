@@ -40,7 +40,7 @@ from .config import (
 )
 from .endpoints import classify
 from .leaderboard import Leaderboard
-from .meter import Meter, sessions_today, tokens_of
+from .meter import _float, Meter, session_views, sessions_today, tokens_of
 from .pricing import PRICES, has_override, known, overrides, prices_for, set_price, unset_price
 from .watcher import MultiWatcher, ServiceReader
 
@@ -872,24 +872,10 @@ def notify(title: str, message: str) -> bool:
         return False
 
 
-def idle_notice_due(last_seen: float, now: float, after: float,
-                    live: bool, notified_at: float) -> bool:
-    """유휴 알림을 지금 울릴 때인가.
-
-    조용한 구간마다 **한 번만** 울려야 한다 — 마지막 유입 시각이 그 구간의 신분증이다.
-    세션이 하나도 안 열려 있으면 기다리는 사람이 없으므로 울리지 않는다.
-    """
-    return bool(after > 0 and live and last_seen > 0
-                and now - last_seen >= after and notified_at != last_seen)
-
-
-def _idle_notice(meter: Meter, quiet_for: float) -> str:
-    """멈춘 시점의 한 줄 요약. 오늘 얼마나 썼는지가 알림에서 제일 궁금하다."""
-    today = (meter.state.get("today") or {}).get("totals") or {}
-    live = ", ".join(sorted({str(s.get("project") or s.get("service") or "?")
-                             for s in meter.live_sessions()})[:3])
-    return (f"{live or '에이전트'} — {int(quiet_for)}초째 토큰 유입 없음 "
-            f"(오늘 {_num(tokens_of(today))} 토큰 · {_usd(today.get('cost_usd'))})")
+def attention_notice_key(row: Dict[str, Any]) -> Tuple[str, float]:
+    if row.get("attention") != "check":
+        return "", 0.0
+    return str(row.get("key") or ""), _float(row.get("attention_at"))
 
 
 def _idle_loop(meter: Meter, config: Config, stop: threading.Event,
@@ -897,21 +883,25 @@ def _idle_loop(meter: Meter, config: Config, stop: threading.Event,
     """라이브 세션을 지켜보다 유휴 시간이 넘으면 돌아온다. 랭킹 동기화도 여기서 태운다."""
     ttl = float(config.setting("live_ttl_hours", 6))
     idle_limit = float(config.setting("idle_exit_minutes", 30)) * 60.0
-    notify_after = float(config.setting("idle_notify_seconds", 0) or 0)
     idle_since: Optional[float] = None
-    notified_at = 0.0  # 이번 '조용한 구간' 에 이미 알렸나 (마지막 유입 시각으로 식별)
+    attention_setting = config.setting("attention_notify", None)
+    notify_attention = (config.setting("idle_notify_seconds", 0) != 0
+                        if attention_setting is None else bool(attention_setting))
+    notified_at: Dict[str, float] = {}
     while not stop.is_set():
         meter.prune_live(ttl)  # 종료 훅을 못 받고 남은 파일 정리
-        if board is not None:  # sync 가 sync_seconds 로 스스로 스로틀한다
-            board.sync(meter.state)
         live_now = meter.live_sessions()
-        # 유휴 알림 — 세션이 열려 있는데 토큰이 끊겼다 = 내 차례가 돌아왔다는 신호다.
-        # 조용한 구간마다 한 번만 울린다 (마지막 유입 시각이 바뀌면 다시 무장된다).
-        last_seen = float((meter.state.get("total") or {}).get("last_seen") or 0.0)
-        now = time.time()
-        if idle_notice_due(last_seen, now, notify_after, bool(live_now), notified_at):
-            notified_at = last_seen
-            notify("TokenMeter", _idle_notice(meter, now - last_seen))
+        status = dict(meter.state)
+        status["live"] = live_now
+        status["live_count"] = len(live_now)
+        if board is not None:  # sync 가 sync_seconds 로 스스로 스로틀한다
+            board.sync(status)
+        if notify_attention:
+            for row in session_views(status):
+                key, attention_at = attention_notice_key(row)
+                if key and attention_at > notified_at.get(key, 0.0):
+                    notified_at[key] = attention_at
+                    notify("TokenMeter", f"{row['project']} · 확인 필요")
         if live_now:
             idle_since = None
         elif idle_since is None:

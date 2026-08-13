@@ -1362,19 +1362,12 @@ def test_price_override(tmp: Path) -> None:
         pricing._OVER = {}
 
 
-def test_idle_notice_due(tmp: Path) -> None:
-    """유휴 알림은 조용한 구간마다 한 번만 울린다."""
-    from tokenmeter.cli import idle_notice_due
+def test_attention_notice_key(tmp: Path) -> None:
+    from tokenmeter.cli import attention_notice_key
 
-    last, after = 1000.0, 90.0
-    assert not idle_notice_due(last, 1050.0, after, True, 0.0), "아직 90초가 안 됐다"
-    assert idle_notice_due(last, 1100.0, after, True, 0.0)
-    assert not idle_notice_due(last, 1100.0, after, True, last), "같은 구간에 두 번 울리면 스팸"
-    assert not idle_notice_due(last, 1100.0, after, False, 0.0), "세션이 없으면 기다리는 사람도 없다"
-    assert not idle_notice_due(last, 1100.0, 0.0, True, 0.0), "0 이면 꺼진 것"
-    assert not idle_notice_due(0.0, 1100.0, after, True, 0.0), "한 번도 안 먹었으면 알릴 게 없다"
-    # 토큰이 다시 들어오면(last_seen 갱신) 다음 조용한 구간에 다시 울린다
-    assert idle_notice_due(2000.0, 2100.0, after, True, last)
+    row = {"key": "codex/s", "attention": "check", "attention_at": 123.0}
+    assert attention_notice_key(row) == ("codex/s", 123.0)
+    assert attention_notice_key({"key": "codex/s", "attention": "working"}) == ("", 0.0)
 
 
 def test_runtime_paths_and_legacy_copy(tmp: Path) -> None:
