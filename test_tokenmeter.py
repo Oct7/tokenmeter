@@ -152,6 +152,49 @@ def test_dig(tmp: Path) -> None:
     assert dig(CLAUDE_RECORD, "message.usage.cache_read_input_tokens") == 60955
 
 
+def test_adapter_redacts_values_and_refuses_overwrite(tmp: Path) -> None:
+    """비밀 값이 남거나 기존 어댑터 초안이 덮어써지면 실패한다."""
+    from tokenmeter.adapter import init_adapter, redact_fixture
+
+    source = {"api_key": "sk-secret", "usage": {"input_tokens": 42},
+              "model": "private-model", "ok": True, "items": ["secret"]}
+    clean = redact_fixture(source)
+    assert clean == {"api_key": "<redacted>", "usage": {"input_tokens": "<redacted>"},
+                     "model": "", "ok": False, "items": [""]}
+
+    log = tmp / "agent.json"
+    log.write_text(json.dumps(source), encoding="utf-8")
+    out = tmp / "sample-adapter"
+    ok, _ = init_adapter("sample", log, out)
+    assert ok and (out / "service.yaml").exists() and (out / "fixture.json").exists()
+    before = (out / "fixture.json").read_text(encoding="utf-8")
+    ok, _ = init_adapter("sample", log, out)
+    assert not ok and (out / "fixture.json").read_text(encoding="utf-8") == before
+    assert "sk-secret" not in before and "private-model" not in before and "42" not in before
+
+
+def test_adapter_check_requires_confirmed_mode_and_cli_runs(tmp: Path) -> None:
+    """미확정 모드는 막고 CLI check는 설정 파일만 검사해야 한다."""
+    from tokenmeter import cli
+    from tokenmeter.adapter import check_adapter, init_adapter
+
+    log = tmp / "agent.jsonl"
+    _write_lines(log, [{"usage": {"input_tokens": 1, "output_tokens": 2},
+                        "model": "private-model", "session_id": "private-session"}])
+    out = tmp / "sample-adapter"
+    assert init_adapter("sample", log, out)[0]
+    ok, errors = check_adapter(out)
+    assert not ok and errors == ["mode: delta 또는 cumulative 중 하나를 선택하세요"]
+
+    service = (out / "service.yaml").read_text(encoding="utf-8")
+    (out / "service.yaml").write_text(
+        service.replace("mode: choose-delta-or-cumulative", "mode: cumulative"), encoding="utf-8")
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert cli.main(["adapter", "check", str(out)]) == 0
+    assert output.getvalue().strip() == "sample: 구조 검증 통과"
+
+
 def test_claude_jsonl(tmp: Path) -> None:
     """Claude Code: delta 모드, uuid 중복 제거, match 필터."""
     root = tmp / "projects"

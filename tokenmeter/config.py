@@ -136,7 +136,7 @@ def _expand(p: str) -> Path:
     return Path(os.path.expandvars(str(p))).expanduser()
 
 
-def _parse_service(name: str, raw: Dict[str, Any]) -> ServiceSpec:
+def parse_service(name: str, raw: Dict[str, Any]) -> ServiceSpec:
     inst_raw = raw.get("install") or None
     install = None
     if inst_raw:
@@ -228,7 +228,7 @@ def load_config() -> Config:
         user = yaml.safe_load(USER_CONFIG.read_text(encoding="utf-8")) or {}
         raw = deep_merge(raw, user)
     services = {
-        name: _parse_service(name, spec or {})
+        name: parse_service(name, spec or {})
         for name, spec in (raw.get("services") or {}).items()
     }
     # 토글은 yaml 위에 덮어쓴다 — `enabled_services()` 하나만 거치면 워처·설치·표가

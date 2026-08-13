@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import installer
+from .adapter import check_adapter, init_adapter
 from .config import (
     LOG_FILE,
     PID_FILE,
@@ -1042,6 +1043,18 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_adapter(args: argparse.Namespace) -> int:
+    """개인 값을 남기지 않는 새 서비스 어댑터 초안을 만든다/검사한다."""
+    if args.adapter_action == "init":
+        ok, message = init_adapter(args.name, Path(args.log), Path.cwd() / f"{args.name}-adapter")
+        print(("✓ " if ok else "✗ ") + message)
+        return 0 if ok else 1
+    ok, messages = check_adapter(Path(args.path))
+    for message in messages:
+        print(message)
+    return 0 if ok else 1
+
+
 # ── 명령: daemon ───────────────────────────────────────────────────────────
 
 
@@ -1251,6 +1264,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("reset", cmd_reset, "누적 통계 초기화")
     p.add_argument("--yes", action="store_true", help="확인 없이 초기화")
+
+    p = add("adapter", cmd_adapter, "개인 정보를 남기지 않는 서비스 어댑터 초안")
+    adapter_sub = p.add_subparsers(dest="adapter_action", required=True)
+    init = adapter_sub.add_parser("init", help="로그에서 어댑터 초안을 만든다")
+    init.add_argument("name", help="서비스 이름")
+    init.add_argument("--log", required=True, help="JSON/JSONL 로그 파일 또는 디렉터리")
+    check = adapter_sub.add_parser("check", help="어댑터 초안 구조를 검사한다")
+    check.add_argument("path", help="service.yaml과 fixture.json이 있는 디렉터리")
 
     return parser
 
