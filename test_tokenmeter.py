@@ -764,6 +764,38 @@ def test_installer_opencode_plugin(tmp: Path) -> None:
     installer.install(config)
     assert path.exists() and installer.PLUGIN_MARKER in path.read_text(encoding="utf-8")
     assert installer.is_installed(spec)
+    probe = path.with_suffix(".mjs")
+    probe.write_text(
+        path.read_text(encoding="utf-8")
+        .replace(
+            'import { spawn } from "node:child_process"',
+            "const calls = []; const spawn = (...args) => { calls.push(args); return { unref() {} } }",
+        )
+        .replace("export const TokenMeter", "export { calls }; export const TokenMeter"),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "node", "--input-type=module", "-e",
+            (
+                "import { TokenMeter, calls } from './tokenmeter.mjs'; "
+                "const plugin = await TokenMeter({ directory: '/work/opencode' }); "
+                "await plugin.event({ event: { type: 'ignored', properties: { sessionID: 'ignored' } } }); "
+                "await plugin.event({ event: { type: 'session.created', properties: { sessionID: 'new' } } }); "
+                "await plugin.event({ event: { type: 'session.deleted', properties: { sessionID: 'gone' } } }); "
+                "console.log(JSON.stringify(calls));"
+            ),
+        ],
+        cwd=path.parent,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = json.loads(result.stdout)
+    assert [call[1][1:] for call in calls] == [
+        ["opencode", "SessionStart", "new"],
+        ["opencode", "SessionEnd", "gone"],
+    ]
     installer.install(config)  # 멱등
     assert installer.is_installed(spec)
 
@@ -967,9 +999,14 @@ def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
         "claude-code", "Notification", {"notification_type": "auth_success"}
     ) == ""
     assert hook.attention_signal(
+        "claude-code", "Notification", {"notification_type": "permission_prompt"}
+    ) == "check"
+    assert hook.attention_signal(
         "codex", "PermissionRequest", {"approvals_reviewer": "auto_review"}
     ) == "working"
     assert hook.attention_signal("opencode", "question.asked", {}) == "check"
+    assert hook.attention_signal("claude-code", "SessionStart", {}) == "working"
+    assert hook.attention_signal("claude-code", "unknown", {}) == ""
     path = tmp / "live.json"
     secret_payload = {"tool_input": {"command": "secret-command"}}
     hook._write_live(path, "codex", "s", "/work/api", "PermissionRequest", "gpt",
