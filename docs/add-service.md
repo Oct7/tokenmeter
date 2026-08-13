@@ -6,6 +6,24 @@ TokenMeter 에 **아직 지원하지 않는 AI 코딩 도구**를 붙이는 방�
 > 개인용으로만 쓸 거면 `~/.config/tokenmeter/services.yaml` 에 같은 구조로 쓰면 됩니다.
 > 저장소의 기본 설정 위에 깊은 병합(deep merge)되므로, 기존 서비스의 필드 하나만 덮어쓰는 것도 됩니다.
 
+## 어댑터로 초안 만들기 (선택)
+
+로그 구조를 먼저 익히려면 다음 명령으로 익명화된 초안을 만듭니다.
+
+```bash
+tokenmeter adapter init gemini-cli --log ~/.gemini/tmp
+tokenmeter adapter check ./gemini-cli-adapter
+```
+
+`init`은 최신 JSON/JSONL 레코드를 읽어 현재 디렉터리에 정확히 두 파일만 생성합니다.
+`fixture.json`에는 문자열·숫자·불리언 값을 남기지 않고, `service.yaml`에는 발견한
+dot-path만 채웁니다. `mode`는 `choose-delta-or-cumulative`로 남겨지므로 실제 로그가
+증분인지 누적인지 확인해 `delta` 또는 `cumulative`로 직접 바꿔야 합니다. `key`와
+`match`도 같은 이유로 미해결 상태입니다. 비어 있지 않은 대상 디렉터리는 덮어쓰지 않습니다.
+
+프롬프트·응답·툴 명령·파일명·경로는 어댑터 fixture와 공개 출력에 저장하거나 전송하지
+않습니다. 어댑터는 측정 설정 초안일 뿐 로그 원문을 복제하지 않습니다.
+
 ---
 
 ## 0. 먼저 알아야 할 것 — 두 축은 독립이다

@@ -21,7 +21,8 @@ Claude Code / Codex / OpenCode 가 쓰는 토큰을 **자동으로** 재고,
 └────────────────────────────────────────────────────┘
 ```
 
-기본 화면이 **세션 목록**입니다 — 프로젝트 · 모델 · effort · **tok/s** · **ctx%** 가 한 줄씩,
+기본 화면이 **세션 목록**입니다 — 프로젝트 · 모델 · effort · **tok/s** · **ctx%** 와
+**확인·작업·대기·종료** 상태가 한 줄씩,
 지금 토큰을 태우고 있는 세션이 맨 위로 올라옵니다.
 
 **ctx% 는 그 세션의 컨텍스트가 얼마나 찼는지**입니다 (마지막 턴 기준). 90% 를 넘으면
@@ -38,6 +39,10 @@ Claude Code / Codex / OpenCode 가 쓰는 토큰을 **자동으로** 재고,
 > '생성'된 적이 없고, 실측에서 출력 토큰의 300배가 넘어 넣는 순간 미터가 캐시 히트율
 > 그래프가 됩니다. 입력·캐시 총량은 아래 `^ v ~` 줄에서 봅니다.
 > 만땅 기준은 `settings.overlay.full_scale` (기본 300 출력 tok/s) 로 조정합니다.
+
+세션 상태는 다음 네 가지뿐입니다. `확인`은 사용자의 응답이나 권한 확인이 필요한 상태,
+`작업`은 최근 토큰이 들어오는 상태, `대기`는 라이브지만 토큰 유입이 멈춘 상태,
+`종료`는 라이브 기록이 없는 상태입니다. Context Runway와 압축 시점 예측 기능은 구현하지 않았습니다.
 
 아래쪽 패널은 **더블클릭으로 셋을 돌려 봅니다.**
 
@@ -284,11 +289,48 @@ settings:
 | `price set <모델> [--input N] [--cache-read N] [--cache-write N] [--output N] [--window N]` | 그 모델의 단가/컨텍스트 창을 직접 못 박습니다 (`~/.config/tokenmeter/prices.json`). 적어 넣은 항목만 이기고 나머지는 기본 표에서 옵니다 |
 | `price unset <모델>` | 지정한 단가를 지웁니다 |
 | `status [--scope today\|total] [--sync]` | 누적·오늘·세션 토큰, **벤더/요금제/모델/클라이언트/프로젝트별 토큰·호출·세션·비용**, 선택형 랭킹, 라이브 세션 |
+| `status --json` | 내부 경로·세션 ID·라우팅 URL을 제외한 공개 상태 스냅샷 한 개를 출력 |
 | `daemon [--no-overlay]` | 워처(스레드) + 랭킹 동기화 + 오버레이(메인 스레드). 훅이 자동으로 띄웁니다 |
 | `start` / `stop` | 훅이 없는 환경에서 라이브 세션을 수동 등록/해제 |
 | `watch [--service X]` | 오버레이 없이 감시만 |
+| `watch --jsonl` | 상태 스냅샷과 양의 토큰 변화/관심 상태 변화를 읽기 전용 JSONL로 출력 |
+| `receipt --format text\|markdown\|json` | 가장 최근 세션 영수증. 금액 라벨은 API면 `예상 사용액`, 구독이면 `API 환산 가치` |
+| `adapter init NAME --log PATH` | 최근 JSON/JSONL 로그를 익명화해 `NAME-adapter/fixture.json`과 `service.yaml`, 정확히 두 파일을 생성 |
+| `adapter check PATH` | 두 파일의 구조와 dot-path를 검사하며 `mode: delta` 또는 `cumulative` 선택은 사용자에게 남김 (`unresolved`) |
+| `team [--sync] [--json]` | 기존 자체 호스팅 leaderboard의 `today.attention` 집계로 팀의 확인·작업·대기·위험 수를 표시 |
 | `overlay` | 오버레이만 (읽기 전용 — 토큰은 데몬이 먹입니다) |
 | `reset --yes` | 누적 통계 초기화 |
+
+### 공개 JSON과 개인정보 경계
+
+`status --json`은 `schema_version`, `type`, `timestamp`가 있는 공개 스냅샷을 한 개
+출력합니다. `watch --jsonl`은 첫 스냅샷 뒤 `delta`, `attention`, 또는 초기화 시
+새 `snapshot`을 한 줄씩 출력합니다. 공개 JSON에는 내부 경로, 세션 ID, 라우팅 URL이
+없으며 프롬프트, 응답, 툴 명령, 파일명을 저장하거나 전송하지 않습니다.
+
+관심 파일에는 이벤트 이름과 시각만 남깁니다. 이 공개 투영은 프로젝트·서비스·모델과
+집계 토큰 같은 화면에 필요한 값만 허용 목록으로 내보냅니다. 어댑터 fixture는 모든
+일반 값을 지우고 비밀처럼 보이는 키만 `<redacted>`로 바꿉니다.
+
+### 영수증, 어댑터, 팀 모드
+
+영수증은 저장된 세션 중 마지막으로 갱신된 하나를 읽기 전용으로 보여줍니다. `text`는
+5줄, `markdown`은 제목과 4개 항목, `json`은 동일한 영수증 객체입니다. 비용 표시는
+API 요금제에서 `예상 사용액`, 구독에서 `API 환산 가치`, 알 수 없는 요금제에서
+`API 환산가`를 사용합니다. 세션이 없으면 명령은 1로 끝나며 영수증을 만들 수 없다는
+메시지만 출력합니다.
+
+`adapter init NAME --log PATH`는 최신 JSON/JSONL 레코드를 한 번 읽어 현재 디렉터리의
+`NAME-adapter/` 아래 `fixture.json`과 `service.yaml`만 만듭니다. 값은 fixture에 남기지
+않고 `service.yaml`의 `mode`, `key`, `match`는 `choose-delta-or-cumulative` 등
+미해결 선택으로 둡니다. 비어 있지 않은 대상은 덮어쓰지 않습니다. `adapter check PATH`는
+`mode`를 `delta` 또는 `cumulative`로 고르고 dot-path가 fixture 구조에 맞는지만 확인합니다.
+
+`team`은 endpoint가 설정되지 않았으면 로컬 사용자 한 줄만 표시하며 네트워크를 호출하지
+않습니다. `team --sync`는 기존 자체 호스팅 leaderboard endpoint가 있을 때만 즉시 동기화하고,
+없거나 오프라인이면 캐시/로컬 폴백으로 계속 표시합니다. 전송되는 새 관심 정보는
+`today` 아래의 `check`, `working`, `waiting`, `risk` 정수 집계뿐입니다. TokenMeter는
+호스팅 팀 서비스가 아니라 기존 endpoint를 사용하는 클라이언트입니다.
 
 ## 끄는 방법이 셋입니다 — 서로 다릅니다
 
@@ -400,7 +442,9 @@ settings:
 
 **올라가는 것** — 핸들, 오늘/누적 합계(토큰 4종 · 비용 · 호출 · 세션),
 그리고 **모델 / 벤더 / 요금제 / 클라이언트**별 내역(각각 토큰·비용·호출·세션).
-**안 올라가는 것** — 프로젝트명, 경로, 세션 내용, 프롬프트. `state.json` 의 `projects`
+`team` 명령이 추가하는 것은 `today` 안의 확인·작업·대기·위험 **정수 집계뿐**입니다.
+**안 올라가는 것** — 프로젝트명, 경로, 세션 ID, 라우팅 URL, 세션 내용, 프롬프트, 응답,
+툴 명령, 파일명. `state.json` 의 `projects`
 버킷과 `sessions` 기록은 전송 대상이 아닙니다.
 
 받는 쪽(서버)이 돌려줄 모양은 우리가 올리는 본문과 같습니다. 리스트든 `{"entries": [...]}` 든 받습니다.

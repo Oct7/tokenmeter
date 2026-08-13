@@ -2,7 +2,7 @@
 
 **See when your AI coding agents are working, waiting, or running out of context.**
 
-TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. It discovers active sessions, shows live output speed and context pressure, keeps cost history, and lets you know when token flow stops.
+TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. It discovers active sessions, shows whether they need attention, are working, waiting, or done, and keeps usage history locally.
 
 [한국어](README.ko.md) · [Advanced reference](docs/reference.ko.md) · [Add an agent](docs/add-service.md)
 
@@ -22,8 +22,8 @@ TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. 
 
 ## Why TokenMeter
 
-- **Know what is actually running.** Live sessions are sorted by output speed across supported agents.
-- **See compaction coming.** Context pressure changes color at 70% and 90%.
+- **Know what needs attention.** Sessions are labeled check, working, waiting, or done.
+- **See context pressure.** Context pressure changes color at 70% and 90%; Context Runway or compaction prediction is not implemented.
 - **Understand usage locally.** Inspect tokens, estimated API-equivalent cost, cache savings, projects, models, and daily history.
 - **Stop watching terminals.** A desktop notification fires after an active session becomes quiet.
 
@@ -67,7 +67,12 @@ Adding another log-based agent is configuration-only. See [the service guide](do
 ## Commands
 
 ```bash
-tokenmeter status                 # usage, history, sessions
+tokenmeter status --json
+tokenmeter watch --jsonl
+tokenmeter receipt --format markdown
+tokenmeter adapter init gemini-cli --log ~/.gemini/tmp
+tokenmeter adapter check ./gemini-cli-adapter
+tokenmeter team --sync
 tokenmeter services               # detected logs and hook state
 tokenmeter doctor                 # validate parsers and installation
 tokenmeter meter off              # hide overlay; keep measuring
@@ -90,10 +95,11 @@ It provides `/tm`, `/tm-meter`, `/tm-measure`, and `/tm-doctor`.
 
 ## Privacy and data
 
-- Prompt text, project paths, and session contents are never uploaded.
+- Attention files store event name and time only. Prompt text, responses, tool commands, project paths, filenames, and session contents are not stored or transmitted.
+- Public JSON omits internal paths, session IDs, and routing URLs. Adapter fixtures erase values before writing them.
 - Runtime state lives in `~/Library/Application Support/tokenmeter` on macOS or `${XDG_STATE_HOME:-~/.local/state}/tokenmeter` on Linux.
 - User overrides live in `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`.
-- The optional self-hosted leaderboard is disabled by default. Enabling it uploads only the aggregates documented in [the advanced reference](docs/reference.ko.md#글로벌-랭킹-붙이기).
+- The optional self-hosted leaderboard is disabled by default. Team sync sends only aggregate attention counts nested under `today` through that existing endpoint; it is not a hosted TokenMeter service.
 
 ## Update or remove
 

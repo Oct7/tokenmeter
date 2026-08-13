@@ -11,7 +11,7 @@ Claude Code, Codex, OpenCode의 로컬 로그를 읽어 사용량·비용·라�
 
 | 커맨드 | 하는 일 |
 |---|---|
-| `/tm` | 사용량·비용·일별 히스토리 |
+| `/tm` | 사용량·비용·히스토리와 receipt·adapter·team 요청 |
 | `/tm-meter on\|off` | 미터 창만 켜고 끔; 측정은 계속 |
 | `/tm-measure on\|off` | 측정 자체를 켜고 끔 |
 | `/tm-doctor` | 훅·데몬·로그 진단 |
@@ -40,6 +40,11 @@ tokenmeter install
 | 특정 에이전트 제외 | `tokenmeter off --service codex` |
 | 미터 창 끄기/켜기 | `tokenmeter meter off` / `tokenmeter meter on` |
 | 사용량·비용 | `tokenmeter status` |
+| 공개 상태 JSON | `tokenmeter status --json` |
+| 읽기 전용 JSONL 감시 | `tokenmeter watch --jsonl` |
+| 최근 세션 영수증 | `tokenmeter receipt --format text\|markdown\|json` |
+| 서비스 어댑터 초안 | `tokenmeter adapter init NAME --log PATH` / `tokenmeter adapter check PATH` |
+| 팀 관심 현황 | `tokenmeter team` / `tokenmeter team --sync` / `tokenmeter team --json` |
 | 훅 현황 | `tokenmeter services` |
 | 진단 | `tokenmeter doctor` |
 | 모델 단가 | `tokenmeter price` |

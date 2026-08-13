@@ -2,7 +2,7 @@
 
 **여러 AI 코딩 에이전트가 일하는지, 기다리는지, 컨텍스트가 찼는지 한눈에.**
 
-TokenMeter는 Claude Code, Codex, OpenCode를 위한 로컬 우선 데스크톱 미터입니다. 여러 세션의 실시간 출력 속도와 컨텍스트 위험을 보여주고, 비용·히스토리를 기록하며, 토큰 흐름이 멈추면 알려줍니다.
+TokenMeter는 Claude Code, Codex, OpenCode를 위한 로컬 우선 데스크톱 미터입니다. 여러 세션을 **확인·작업·대기·종료** 상태로 보여주고 사용량 히스토리를 로컬에 기록합니다.
 
 [English](README.md) · [상세 레퍼런스](docs/reference.ko.md) · [새 에이전트 추가](docs/add-service.md)
 
@@ -22,8 +22,8 @@ TokenMeter는 Claude Code, Codex, OpenCode를 위한 로컬 우선 데스크톱 
 
 ## TokenMeter를 쓰는 이유
 
-- **무엇이 실제로 일하는지 확인합니다.** 지원하는 에이전트의 라이브 세션을 출력 속도순으로 보여줍니다.
-- **압축 시점을 미리 봅니다.** 컨텍스트 점유율이 70%, 90%를 넘으면 색이 바뀝니다.
+- **무엇이 실제로 일하는지 확인합니다.** 세션을 확인·작업·대기·종료 상태로 보여줍니다.
+- **컨텍스트 압력을 봅니다.** 컨텍스트 점유율이 70%, 90%를 넘으면 색이 바뀝니다. Context Runway나 압축 시점 예측은 구현하지 않았습니다.
 - **사용량을 로컬에서 이해합니다.** 토큰, API 환산 비용, 캐시 절감, 프로젝트, 모델, 일별 기록을 확인합니다.
 - **터미널을 계속 보지 않아도 됩니다.** 작업 중인 세션의 토큰 흐름이 멈추면 데스크톱 알림이 옵니다.
 
@@ -67,7 +67,12 @@ tokenmeter install
 ## 주요 명령
 
 ```bash
-tokenmeter status                 # 사용량·히스토리·세션
+tokenmeter status --json
+tokenmeter watch --jsonl
+tokenmeter receipt --format markdown
+tokenmeter adapter init gemini-cli --log ~/.gemini/tmp
+tokenmeter adapter check ./gemini-cli-adapter
+tokenmeter team --sync
 tokenmeter services               # 로그 감지와 훅 상태
 tokenmeter doctor                 # 파서와 설치 검증
 tokenmeter meter off              # 창만 숨기고 측정은 유지
@@ -90,10 +95,11 @@ npx skills add Oct7/tokenmeter -g -a claude-code
 
 ## 개인정보와 데이터
 
-- 프롬프트, 프로젝트 경로, 세션 내용은 업로드하지 않습니다.
+- 관심 파일에는 이벤트 이름과 시각만 저장합니다. 프롬프트·응답·툴 명령·프로젝트 경로·파일명·세션 내용은 저장하거나 전송하지 않습니다.
+- 공개 JSON에는 내부 경로·세션 ID·라우팅 URL이 없습니다. 어댑터 fixture는 값을 지운 뒤 생성합니다.
 - macOS 상태 경로는 `~/Library/Application Support/tokenmeter`, Linux는 `${XDG_STATE_HOME:-~/.local/state}/tokenmeter`입니다.
 - 사용자 설정은 `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`에 있습니다.
-- 선택형 자체 호스팅 랭킹은 기본적으로 꺼져 있습니다. 켰을 때 전송되는 집계값은 [상세 레퍼런스](docs/reference.ko.md#글로벌-랭킹-붙이기)에 명시돼 있습니다.
+- 선택형 자체 호스팅 랭킹은 기본적으로 꺼져 있습니다. 팀 동기화는 기존 endpoint로 `today` 안의 관심 상태 집계만 보내며, TokenMeter 호스팅 서비스는 제공하지 않습니다.
 
 ## 업데이트와 제거
 
