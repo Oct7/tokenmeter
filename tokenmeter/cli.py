@@ -211,6 +211,51 @@ def public_snapshot(state: Dict[str, Any], record_type: str = "snapshot") -> Dic
     }
 
 
+MONEY_LABELS = {"api": "예상 사용액", "subscription": "API 환산 가치"}
+
+
+def receipt_data(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    rows = [row for row in (state.get("sessions") or {}).values() if isinstance(row, dict)]
+    if not rows:
+        return None
+    rec = max(rows, key=lambda row: float(row.get("last_seen") or 0.0))
+    totals = dict(rec.get("totals") or {})
+    cost = float(totals.get("cost_usd") or 0.0)
+    window = float(rec.get("ctx_win") or 0.0)
+    return {
+        "schema_version": 1, "type": "receipt", "project": rec.get("project") or "(unknown)",
+        "service": rec.get("service") or "", "model": rec.get("model") or "",
+        "effort": rec.get("effort") or "", "plan": rec.get("plan") or "unknown",
+        "started_at": float(rec.get("started_at") or 0.0),
+        "last_seen": float(rec.get("last_seen") or 0.0),
+        "duration_seconds": max(0.0, float(rec.get("last_seen") or 0.0) - float(rec.get("started_at") or 0.0)),
+        "totals": totals, "money_label": MONEY_LABELS.get(str(rec.get("plan")), "API 환산가"),
+        "amount_usd": cost, "ctx_percent": round(100 * float(rec.get("ctx") or 0.0) / window, 1) if window else None,
+        "subagent_percent": round(100 * float(rec.get("sub_cost") or 0.0) / cost, 1) if cost else 0.0,
+    }
+
+
+def format_receipt(data: Dict[str, Any], format_name: str) -> str:
+    totals = data["totals"]
+    tokens = tokens_of(totals)
+    minutes = int(data["duration_seconds"] // 60)
+    identity = " · ".join(str(data[key]) for key in ("project", "service", "model") if data.get(key))
+    amount = f"{data['money_label']} ${data['amount_usd']:.2f}"
+    context = "-" if data["ctx_percent"] is None else f"{data['ctx_percent']:g}%"
+    lines = [
+        "TokenMeter 영수증", identity,
+        f"{minutes}분 · {tokens:,} 토큰 · {int(totals.get('calls') or 0)} 호출",
+        f"{amount} · 캐시 절감 ${float(totals.get('cache_saved_usd') or 0):.2f}",
+        f"ctx {context} · 서브에이전트 {data['subagent_percent']:g}%",
+    ]
+    if format_name == "json":
+        return json.dumps(data, ensure_ascii=False)
+    if format_name == "markdown":
+        return "\n".join(["### TokenMeter 영수증", f"- {identity}", f"- {lines[2]}",
+                            f"- {lines[3]}", f"- {lines[4]}"])
+    return "\n".join(lines)
+
+
 # ── 데몬 상태 ──────────────────────────────────────────────────────────────
 
 
@@ -773,6 +818,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_receipt(args: argparse.Namespace) -> int:
+    """최근 저장 세션의 읽기 전용 영수증."""
+    state = Meter(load_config(), read_only=True).state
+    data = receipt_data(state)
+    if data is None:
+        print("영수증을 만들 세션이 없습니다.")
+        return 1
+    print(format_receipt(data, args.format))
+    return 0
+
+
 # ── 명령: price ────────────────────────────────────────────────────────────
 
 
@@ -1163,6 +1219,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope", choices=("today", "total"), default="today", help="랭킹 기준 구간")
     p.add_argument("--sync", action="store_true", help="랭킹을 지금 업로드·조회한다")
     p.add_argument("--json", action="store_true", help="공개 상태를 JSON으로 출력")
+
+    p = add("receipt", cmd_receipt, "최근 세션 영수증")
+    p.add_argument("--format", choices=("text", "markdown", "json"), default="text",
+                   help="출력 형식 (기본: text)")
 
     p = add("price", cmd_price, "모델 단가 조회 / 직접 지정 (가격표에 없는 모델)")
     p.add_argument("action", nargs="?", choices=("set", "unset"), help="생략하면 조회")

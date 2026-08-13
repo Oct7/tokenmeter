@@ -1723,6 +1723,25 @@ def test_skill_wrapper_invokes_installed_cli(tmp: Path) -> None:
     assert result.stdout.strip() == "status --sync"
 
 
+def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
+    from tokenmeter.cli import format_receipt, receipt_data
+
+    state = {"sessions": {
+        "claude-code/old": {"project": "old", "last_seen": 1, "totals": {"cost_usd": 9}},
+        "codex/new": {
+            "service": "codex", "project": "api", "model": "gpt-5.6-sol", "effort": "high",
+            "plan": "subscription", "started_at": 10, "last_seen": 70,
+            "ctx": 50_000, "ctx_win": 200_000, "sub_cost": 1.0,
+            "totals": {"input_tokens": 10, "cache_read": 20, "cache_write": 3,
+                       "output_tokens": 7, "cost_usd": 4.0, "cache_saved_usd": 2.0, "calls": 2},
+        },
+    }}
+    data = receipt_data(state)
+    assert data and data["project"] == "api" and data["money_label"] == "API 환산 가치"
+    assert "API 환산 가치 $4.00" in format_receipt(data, "text")
+    assert json.loads(format_receipt(data, "json"))["type"] == "receipt"
+
+
 # ── 러너 ───────────────────────────────────────────────────────────────────
 
 
