@@ -118,9 +118,7 @@ services:
     install:
       target: claude_json
       path: ~/.claude/settings.json
-      # UserPromptSubmit = 사용자 턴마다 한 번. 라이브 파일 mtime 을 갱신해
-      # 장시간 세션이 live_ttl_hours 로 잘리는 걸 막고, 데몬이 죽었으면 되살린다.
-      events: [SessionStart, UserPromptSubmit, SessionEnd]
+      events: [SessionStart, UserPromptSubmit, PermissionRequest, Notification, Stop, SessionEnd]
 
   codex:
     enabled: true
@@ -167,9 +165,7 @@ services:
     install:
       target: claude_json
       path: ~/.codex/hooks.json
-      # Codex 는 중간 이벤트가 확인되지 않아 둘만 등록한다. 대신 생존 신호는
-      # 미터가 토큰 유입으로 찍는다(Meter._touch_live) — 이벤트에 기대지 않는다.
-      events: [SessionStart, SessionEnd]
+      events: [SessionStart, UserPromptSubmit, PermissionRequest, Stop, SessionEnd]
 
   opencode:
     enabled: true

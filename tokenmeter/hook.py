@@ -40,7 +40,16 @@ LOG_FILE = DATA_DIR / "daemon.log"
 TOGGLE_FILE = DATA_DIR / "toggle.json"  # config.py 와 같은 파일 (여기선 yaml 을 못 쓴다)
 
 # 세션 종료로 간주해 라이브 파일을 지우는 이벤트
-STOP_EVENTS = {"SessionEnd", "Stop"}
+STOP_EVENTS = {"SessionEnd", "session.deleted"}
+CHECK_EVENTS = {
+    "PermissionRequest", "Stop", "permission.asked", "permission.v2.asked",
+    "question.asked", "question.v2.asked", "session.idle",
+}
+WORK_EVENTS = {
+    "SessionStart", "UserPromptSubmit", "session.created", "permission.replied",
+    "permission.v2.replied", "question.replied", "question.v2.replied",
+}
+ATTENTION_NOTIFICATIONS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 # 데몬 기동 경합 방지용 락이 이 시간을 넘기면 스테일로 보고 탈취한다
 LOCK_STALE_SECONDS = 60.0
 # stdin 이 열린 채 아무것도 안 오는 경우를 대비한 대기 상한
@@ -123,9 +132,22 @@ def _resolve_cwd(payload: dict) -> str:
     )
 
 
-def _resolve_session_id(payload: dict, cwd: str) -> str:
+def attention_signal(service: str, event: str, payload: dict) -> str:
+    """이벤트를 UI가 쓸 수 있는 최소 주의 신호로 정규화한다."""
+    if event == "Notification":
+        return "check" if _pick(payload, "notification_type") in ATTENTION_NOTIFICATIONS else ""
+    if service == "codex" and event == "PermissionRequest":
+        reviewer = _pick(payload, "approvals_reviewer", "approval_reviewer").lower()
+        if reviewer in {"auto_review", "guardian", "guardian_subagent"}:
+            return "working"
+    if event in CHECK_EVENTS:
+        return "check"
+    return "working" if event in WORK_EVENTS else ""
+
+
+def _resolve_session_id(payload: dict, cwd: str, argv_session_id: str = "") -> str:
     """세션 식별자. 훅이 아무 정보도 못 받으면 cwd 해시로 대체한다."""
-    sid = _pick(payload, "session_id", "sessionId", "id")
+    sid = argv_session_id or _pick(payload, "session_id", "sessionId", "id")
     if sid:
         return sid
     # ponytail: cwd 해시 폴백 — OpenCode 플러그인처럼 세션 id 를 못 주는 경우용.
@@ -137,17 +159,40 @@ def live_path(service: str, session_id: str) -> Path:
     return LIVE_DIR / f"{_safe(service)}__{_safe(session_id)}.json"
 
 
-def _write_live(path: Path, service: str, session_id: str, cwd: str, event: str, model: str) -> None:
+def _write_live(
+    path: Path, service: str, session_id: str, cwd: str, event: str, model: str, attention: str
+) -> None:
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    now = time.time()
+    try:
+        started_at = float(existing.get("started_at"))
+    except (TypeError, ValueError):
+        started_at = 0.0
+    try:
+        attention_at = float(existing.get("attention_at"))
+    except (TypeError, ValueError):
+        attention_at = 0.0
     record = {
         "service": service,
         "session_id": session_id,
         "project": Path(cwd).name if cwd else "",
         "cwd": cwd,
-        "model": model,
-        "started_at": time.time(),
+        "model": model or _pick(existing, "model"),
+        "started_at": started_at or now,
         "event": event,
-        "routing_env": routing_env(),
+        "event_at": now,
+        "routing_env": existing.get("routing_env") if isinstance(existing.get("routing_env"), dict) else routing_env(),
+        "attention": attention or _pick(existing, "attention"),
     }
+    if attention:
+        record["attention_at"] = now
+    elif attention_at:
+        record["attention_at"] = attention_at
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)  # 데몬이 반쯤 쓰인 파일을 읽지 않도록 원자적 교체
@@ -270,7 +315,7 @@ def main(argv: list[str]) -> int:
     payload = _read_payload()
     event = event or _pick(payload, "hook_event_name") or "SessionStart"
     cwd = _resolve_cwd(payload)
-    session_id = _resolve_session_id(payload, cwd)
+    session_id = _resolve_session_id(payload, cwd, argv[3] if len(argv) > 3 else "")
 
     if not os.environ.get("TOKENMETER_HOME"):
         migrate_legacy(ROOT, Path.home() / ".config" / "tokenpet")
@@ -280,11 +325,10 @@ def main(argv: list[str]) -> int:
     if event in STOP_EVENTS:
         path.unlink(missing_ok=True)
     else:
-        if event == "SessionStart" or not path.exists():
-            # 종료 훅을 못 받고 정리된 뒤에도 세션이 살아 있는 경우(OpenCode Ping 등)
-            _write_live(path, service, session_id, cwd, event, _pick(payload, "model"))
-        else:
-            os.utime(path)  # 생존 신호: mtime 만 갱신
+        _write_live(
+            path, service, session_id, cwd, event, _pick(payload, "model"),
+            attention_signal(service, event, payload),
+        )
         # SessionStart 에서만 띄우면 데몬이 죽었을 때(크래시·오버레이 종료·강제 kill)
         # 다음 세션이 시작될 때까지 측정이 통째로 빈다. 살아 있으면 daemon_pid() 검사에서
         # 곧장 물러나므로 매 이벤트마다 불러도 비용이 없다.

@@ -31,6 +31,9 @@ from .pricing import cache_savings, cost_usd
 STATE_VERSION = 2
 DAYS_KEPT = 60  # 일별 히스토리 보관 일수 (state.json 이 무한정 커지지 않게)
 HOURS_KEPT = 24 * DAYS_KEPT  # 시간별 버킷 보관 줄 수 (hours.jsonl)
+ATTENTION_ACTIVE_SECONDS = 30.0
+ATTENTION_LABELS = {"check": "확인", "working": "작업", "waiting": "대기", "done": "종료"}
+ATTENTION_ORDER = {name: i for i, name in enumerate(("check", "working", "waiting", "done"))}
 
 
 def _int(v: Any) -> int:
@@ -46,6 +49,57 @@ def _float(v: Any) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """저장된 토큰 기록과 라이브 신호를 합쳐 세션별 주의 상태를 만든다."""
+    now = time.time() if now is None else now
+    stored = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    live_rows = state.get("live") if isinstance(state.get("live"), list) else []
+    live = {
+        f"{row.get('service') or '?'}/{row.get('session_id') or '?'}": row
+        for row in live_rows if isinstance(row, dict)
+    }
+    rows: List[Dict[str, Any]] = []
+    for key in set(stored) | set(live):
+        rec = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        active = live.get(key)
+        token_at = _float(rec.get("last_seen"))
+        signal = str((active or {}).get("attention") or "")
+        signal_at = _float((active or {}).get("attention_at") or (active or {}).get("updated_at"))
+        if active is None:
+            attention = "done"
+        elif signal == "check" and signal_at > 0 and signal_at >= token_at:
+            attention = "check"
+        elif now - max(token_at, signal_at if signal == "working" else 0.0) <= ATTENTION_ACTIVE_SECONDS:
+            attention = "working"
+        else:
+            attention = "waiting"
+        service, session_id = key.split("/", 1)
+        rows.append({
+            "key": key,
+            "service": rec.get("service") or (active or {}).get("service") or service,
+            "session_id": (active or {}).get("session_id") or session_id,
+            "project": rec.get("project") or (active or {}).get("project") or "(unknown)",
+            "model": rec.get("model") or (active or {}).get("model") or "",
+            "effort": rec.get("effort") or "", "vendor": rec.get("vendor") or "",
+            "plan": rec.get("plan") or "unknown", "started_at": rec.get("started_at") or
+            (active or {}).get("started_at") or 0.0, "last_seen": token_at,
+            "totals": dict(rec.get("totals") or {}), "ctx": _int(rec.get("ctx")),
+            "ctx_win": _int(rec.get("ctx_win")), "sub_cost": _float(rec.get("sub_cost")),
+            "attention": attention, "attention_at": signal_at, "live": active is not None,
+        })
+    return sorted(rows, key=lambda row: (ATTENTION_ORDER[row["attention"]], -_float(row["last_seen"])))
+
+
+def attention_counts(state: Dict[str, Any], now: Optional[float] = None) -> Dict[str, int]:
+    rows = [row for row in session_views(state, now) if row["live"]]
+    return {
+        "check": sum(row["attention"] == "check" for row in rows),
+        "working": sum(row["attention"] == "working" for row in rows),
+        "waiting": sum(row["attention"] == "waiting" for row in rows),
+        "risk": sum(row["ctx_win"] > 0 and row["ctx"] / row["ctx_win"] >= 0.9 for row in rows),
+    }
 
 
 @dataclass

@@ -919,6 +919,86 @@ def test_hook_live_session(tmp: Path) -> None:
         os.environ.update(saved_env)
 
 
+def test_attention_views(tmp: Path) -> None:
+    """라이브 신호와 토큰 시각을 합쳐 세션의 주의 상태를 낸다."""
+    from tokenmeter.meter import attention_counts, session_views
+
+    now = 10_000.0
+    state = {
+        "sessions": {
+            "claude-code/a": {
+                "service": "claude-code", "project": "api", "last_seen": now - 5,
+                "ctx": 180_000, "ctx_win": 200_000, "totals": {"output_tokens": 10},
+            },
+            "codex/b": {
+                "service": "codex", "project": "web", "last_seen": now - 100,
+                "totals": {"output_tokens": 2},
+            },
+            "codex/done": {
+                "service": "codex", "project": "old", "last_seen": now - 200,
+                "totals": {"output_tokens": 1},
+            },
+        },
+        "live": [
+            {"service": "claude-code", "session_id": "a", "attention": "check",
+             "attention_at": now - 10, "updated_at": now - 10},
+            {"service": "codex", "session_id": "b", "attention": "check",
+             "attention_at": now - 1, "updated_at": now - 1},
+            {"service": "opencode", "session_id": "c", "project": "docs",
+             "attention": "working", "attention_at": now - 40, "updated_at": now - 40},
+        ],
+    }
+    rows = {row["key"]: row for row in session_views(state, now)}
+    assert rows["claude-code/a"]["attention"] == "working"
+    assert rows["codex/b"]["attention"] == "check"
+    assert rows["opencode/c"]["attention"] == "waiting"
+    assert rows["codex/done"]["attention"] == "done"
+    assert attention_counts(state, now) == {
+        "check": 1, "working": 1, "waiting": 1, "risk": 1,
+    }
+
+
+def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
+    """훅은 정규화된 상태만 저장하고 Stop은 세션을 종료하지 않는다."""
+    from tokenmeter import hook
+
+    assert hook.attention_signal("claude-code", "Stop", {}) == "check"
+    assert hook.attention_signal(
+        "claude-code", "Notification", {"notification_type": "auth_success"}
+    ) == ""
+    assert hook.attention_signal(
+        "codex", "PermissionRequest", {"approvals_reviewer": "auto_review"}
+    ) == "working"
+    assert hook.attention_signal("opencode", "question.asked", {}) == "check"
+    path = tmp / "live.json"
+    secret_payload = {"tool_input": {"command": "secret-command"}}
+    hook._write_live(path, "codex", "s", "/work/api", "PermissionRequest", "gpt",
+                     hook.attention_signal("codex", "PermissionRequest", secret_payload))
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert "secret-command" not in json.dumps(stored)
+    assert set(stored) <= {
+        "service", "session_id", "project", "cwd", "model", "started_at",
+        "event", "event_at", "routing_env", "attention", "attention_at",
+    }
+    original_live = hook.LIVE_DIR
+    original_no_daemon = os.environ.get("TOKENMETER_NO_DAEMON")
+    hook.LIVE_DIR = tmp
+    os.environ["TOKENMETER_NO_DAEMON"] = "1"
+    try:
+        live = hook.live_path("claude-code", "s")
+        hook._write_live(live, "claude-code", "s", "/work/api", "SessionStart", "opus", "working")
+        hook.main(["hook.py", "claude-code", "Stop", "s"])
+        assert live.exists(), "Stop은 턴 완료이지 세션 종료가 아니다"
+        hook.main(["hook.py", "claude-code", "SessionEnd", "s"])
+        assert not live.exists()
+    finally:
+        hook.LIVE_DIR = original_live
+        if original_no_daemon is None:
+            os.environ.pop("TOKENMETER_NO_DAEMON", None)
+        else:
+            os.environ["TOKENMETER_NO_DAEMON"] = original_no_daemon
+
+
 def test_live_session_lifecycle(tmp: Path) -> None:
     """Meter 의 라이브 세션 등록/조회/정리."""
     from tokenmeter import meter as meter_mod

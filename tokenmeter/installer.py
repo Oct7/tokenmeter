@@ -46,19 +46,27 @@ const PY = __PY__
 const HOOK = __HOOK__
 
 export const TokenMeter = async ({ directory }) => {
-  const fire = (event) => {
+  const fire = (event, sessionID) => {
     try {
-      spawn(PY, [HOOK, __SERVICE__, event], {
+      spawn(PY, [HOOK, __SERVICE__, event, sessionID || ""], {
         detached: true,
         stdio: "ignore",
         env: { ...process.env, TOKENMETER_CWD: directory || process.cwd() },
       }).unref()
     } catch {}
   }
-  fire("SessionStart")
+  const EVENTS = new Set([
+    "session.created", "session.deleted", "session.idle",
+    "permission.asked", "permission.v2.asked", "permission.replied", "permission.v2.replied",
+    "question.asked", "question.v2.asked", "question.replied", "question.v2.replied",
+  ])
   return {
     event: async ({ event }) => {
-      if (event?.type === "session.idle") fire("Ping")
+      const type = event?.type
+      if (!EVENTS.has(type)) return
+      const mapped = type === "session.created" ? "SessionStart"
+        : type === "session.deleted" ? "SessionEnd" : type
+      fire(mapped, event?.properties?.sessionID)
     },
   }
 }
