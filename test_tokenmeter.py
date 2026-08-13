@@ -195,6 +195,109 @@ def test_adapter_check_requires_confirmed_mode_and_cli_runs(tmp: Path) -> None:
     assert output.getvalue().strip() == "sample: 구조 검증 통과"
 
 
+def test_adapter_redacts_nested_arrays_and_scalar_values(tmp: Path) -> None:
+    """배열 안 비밀키나 일반 숫자/null이 원문 그대로 남으면 실패한다."""
+    from tokenmeter.adapter import redact_fixture
+
+    assert redact_fixture({"items": [{"auth_token": "nested-secret", "count": 7, "none": None}],
+                           "ratio": 1.5}) == {
+        "items": [{"auth_token": "<redacted>", "count": 0, "none": None}], "ratio": 0,
+    }
+
+
+def test_adapter_directory_uses_most_recent_log(tmp: Path) -> None:
+    """오래된 로그를 고르면 발견한 스키마가 틀어진다."""
+    from tokenmeter.adapter import init_adapter
+
+    logs = tmp / "logs"
+    old = logs / "old.json"
+    new = logs / "nested" / "new.jsonl"
+    _write(old, json.dumps({"usage": {"input_tokens": 1}}))
+    _write_lines(new, [{"fresh": {"input": 2}}])
+    out = tmp / "adapter"
+    assert init_adapter("sample", logs, out)[0]
+    fixture = json.loads((out / "fixture.json").read_text(encoding="utf-8"))
+    assert fixture == {"fresh": {"input": 0}}
+
+
+def test_adapter_parse_failures_create_no_files(tmp: Path) -> None:
+    """깨진 JSON/JSONL은 출력 디렉터리조차 만들지 않아야 한다."""
+    from tokenmeter.adapter import init_adapter
+
+    for suffix, content in (("json", "{"), ("jsonl", "not-json\n{\n")):
+        log = tmp / f"broken.{suffix}"
+        log.write_text(content, encoding="utf-8")
+        out = tmp / f"{suffix}-adapter"
+        assert not init_adapter("sample", log, out)[0]
+        assert not out.exists()
+
+
+def test_adapter_rolls_back_first_file_when_second_write_fails(tmp: Path) -> None:
+    """service.yaml 쓰기 실패 뒤 fixture.json이 남으면 개인정보 초안이 고아가 된다."""
+    from tokenmeter import adapter
+
+    log = tmp / "log.json"
+    _write(log, json.dumps({"usage": {"input_tokens": 1}}))
+    out = tmp / "adapter"
+    original = adapter._atomic_write
+    calls = [0]
+
+    def fail_second(path: Path, text: str) -> None:
+        calls[0] += 1
+        if calls[0] == 2:
+            raise OSError("disk full")
+        original(path, text)
+
+    adapter._atomic_write = fail_second
+    try:
+        assert not adapter.init_adapter("sample", log, out)[0]
+    finally:
+        adapter._atomic_write = original
+    assert not list(out.iterdir())
+
+
+def test_adapter_check_rejects_bad_service_counts_and_missing_paths(tmp: Path) -> None:
+    """서비스 개수 또는 설정 경로가 잘못되면 구조 검사가 통과하면 안 된다."""
+    import yaml
+    from tokenmeter.adapter import check_adapter
+
+    adapter_dir = tmp / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "fixture.json").write_text("{}", encoding="utf-8")
+    for services in ({}, {"one": {}, "two": {}}):
+        (adapter_dir / "service.yaml").write_text(
+            yaml.safe_dump({"services": services}), encoding="utf-8")
+        assert check_adapter(adapter_dir) == (
+            False, ["service.yaml에는 services 아래 서비스가 정확히 하나 있어야 합니다"])
+
+    (adapter_dir / "service.yaml").write_text(yaml.safe_dump({"services": {"one": {
+        "mode": "delta", "fields": {"input": "usage.input_tokens"}, "context": {},
+    }}}), encoding="utf-8")
+    assert check_adapter(adapter_dir) == (
+        False, ["fields.input: usage.input_tokens 경로가 fixture.json에 없습니다"])
+
+
+def test_adapter_cli_rejects_escaping_name_before_writing(tmp: Path) -> None:
+    """NAME의 상위 경로/절대 경로가 현재 디렉터리 밖에 파일을 만들면 안 된다."""
+    from tokenmeter import cli
+
+    work = tmp / "work"
+    work.mkdir()
+    log = work / "log.json"
+    _write(log, json.dumps({"usage": {"input_tokens": 1}}))
+    previous = Path.cwd()
+    try:
+        os.chdir(work)
+        for name, escaped in (("../outside", tmp / "outside-adapter"),
+                              ("/absolute", Path("/absolute-adapter"))):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                assert cli.main(["adapter", "init", name, "--log", str(log)]) == 1
+            assert not escaped.exists()
+    finally:
+        os.chdir(previous)
+
+
 def test_claude_jsonl(tmp: Path) -> None:
     """Claude Code: delta 모드, uuid 중복 제거, match 필터."""
     root = tmp / "projects"

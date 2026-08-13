@@ -1046,6 +1046,10 @@ def cmd_reset(args: argparse.Namespace) -> int:
 def cmd_adapter(args: argparse.Namespace) -> int:
     """개인 값을 남기지 않는 새 서비스 어댑터 초안을 만든다/검사한다."""
     if args.adapter_action == "init":
+        if (not args.name or args.name in {".", ".."} or "/" in args.name
+                or "\\" in args.name or Path(args.name).is_absolute()):
+            print("✗ 서비스 이름은 경로 구분자가 없는 한 단어여야 합니다")
+            return 1
         ok, message = init_adapter(args.name, Path(args.log), Path.cwd() / f"{args.name}-adapter")
         print(("✓ " if ok else "✗ ") + message)
         return 0 if ok else 1
