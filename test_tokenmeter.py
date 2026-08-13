@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -994,10 +995,22 @@ def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
     from tokenmeter.cli import public_snapshot
 
     now = time.time()
+    secret_url = "https://gateway.secret.example/v1"
+    metadata = "unexpected-nested-metadata"
     state = {
         "updated_at": now,
-        "today": {"date": "2026-08-14", "totals": {"output_tokens": 7}},
-        "total": {"totals": {"output_tokens": 7}},
+        "today": {"date": "2026-08-14", "totals": {"output_tokens": 7, "meta": metadata}},
+        "total": {"totals": {"output_tokens": 7}, "meta": {"value": metadata}},
+        "days": {"2026-08-14": {"output_tokens": 7, "meta": metadata}},
+        "projects": {"api": {"totals": {"output_tokens": 7, "meta": metadata}}},
+        "services": {"codex": {"totals": {"output_tokens": 7}}},
+        "models": {"gpt-5": {"totals": {"output_tokens": 7}, "vendor": "openai"}},
+        "vendors": {"openai": {"totals": {"output_tokens": 7}}},
+        "plans": {"api": {"totals": {"output_tokens": 7}}},
+        "endpoints": {
+            secret_url: {"totals": {"output_tokens": 7, "meta": metadata}, "meta": metadata},
+            "https://api.openai.com/v1": {"totals": {"output_tokens": 3}},
+        },
         "sessions": {},
         "live": [{"service": "codex", "session_id": "secret-id", "project": "api",
                   "cwd": "/secret/path", "routing_env": {"OPENAI_BASE_URL": "secret"},
@@ -1007,6 +1020,11 @@ def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
     raw = json.dumps(out)
     assert out["schema_version"] == 1 and out["type"] == "snapshot"
     assert "secret-id" not in raw and "/secret/path" not in raw and "routing_env" not in raw
+    assert secret_url not in raw and metadata not in raw
+    assert set(out["endpoints"]) == {"self-hosted", "api.openai.com"}
+    assert out["endpoints"]["self-hosted"]["totals"]["output_tokens"] == 7
+    assert out["projects"]["api"]["totals"]["output_tokens"] == 7
+    assert out["models"]["gpt-5"]["vendor"] == "openai"
     assert out["sessions"][0]["attention"] == "working"
 
 
@@ -1042,6 +1060,93 @@ def test_totals_delta_reports_increases_and_reset(tmp: Path) -> None:
         "cost_usd": 0.025, "calls": 1,
     }
     assert totals_delta(after, before) is None
+
+
+def test_watch_jsonl_reads_daemon_state_and_emits_changes(tmp: Path) -> None:
+    from tokenmeter import cli, meter as meter_mod
+
+    now = time.time()
+    totals = lambda output: {"input_tokens": 0, "cache_read": 0, "cache_write": 0,
+                             "output_tokens": output, "cost_usd": 0.0, "calls": output}
+    session = {"service": "codex", "project": "api", "model": "gpt-5", "started_at": now - 5,
+               "last_seen": now - 1, "totals": totals(1)}
+    initial = {"updated_at": 1.0, "today": {"date": "2026-08-14", "totals": totals(1)},
+               "total": {"totals": totals(1)}, "sessions": {"codex/s1": session}}
+    increased = {**initial, "updated_at": 2.0,
+                 "today": {"date": "2026-08-14", "totals": totals(3)},
+                 "total": {"totals": totals(3)}}
+    reset = {**initial, "updated_at": 3.0,
+             "today": {"date": "2026-08-14", "totals": totals(0)},
+             "total": {"totals": totals(0)}}
+    saved_live, saved_pid, saved_sleep = meter_mod.LIVE_DIR, cli._daemon_pid, cli.time.sleep
+    meter_mod.LIVE_DIR = tmp / "live"
+    meter_mod.LIVE_DIR.mkdir()
+    try:
+        with _state_file(tmp):
+            def write_state(state: Dict[str, Any]) -> None:
+                _write(meter_mod.STATE_FILE, json.dumps(state))
+
+            write_state(initial)
+            before = meter_mod.STATE_FILE.read_text(encoding="utf-8")
+
+            def assert_read_only() -> None:
+                assert meter_mod.STATE_FILE.read_text(encoding="utf-8") == before
+
+            def write_live() -> None:
+                _write(meter_mod.LIVE_DIR / "codex__s1.json", json.dumps({
+                    "service": "codex", "session_id": "s1", "project": "api", "model": "gpt-5",
+                    "started_at": now - 5, "attention": "working", "attention_at": now,
+                }))
+
+            steps = [
+                lambda: (assert_read_only(), write_state(increased)),
+                write_live,
+                lambda: write_state(reset),
+                lambda: (_ for _ in ()).throw(KeyboardInterrupt),
+            ]
+
+            def sleep(_seconds: float) -> None:
+                steps.pop(0)()
+
+            cli._daemon_pid = lambda: 12345
+            cli.time.sleep = sleep
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                assert cli.cmd_watch(argparse.Namespace(jsonl=True, service=None)) == 0
+    finally:
+        meter_mod.LIVE_DIR, cli._daemon_pid, cli.time.sleep = saved_live, saved_pid, saved_sleep
+
+    records = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [record["type"] for record in records] == ["snapshot", "delta", "attention", "snapshot"]
+    assert records[1]["delta"] == {"output_tokens": 2, "calls": 2}
+    assert records[2]["sessions"][0]["attention"] == "working"
+    assert all(record["schema_version"] == 1 and record["timestamp"] for record in records)
+
+
+def test_jsonl_broken_pipe_is_a_clean_exit(tmp: Path) -> None:
+    from tokenmeter import cli
+
+    class BrokenStdout:
+        def reconfigure(self, **_kw: Any) -> None:
+            pass
+
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            pass
+
+        def fileno(self) -> int:
+            return 1
+
+    saved = cli.sys.stdout, cli.os.dup2, cli.os.open
+    try:
+        cli.sys.stdout = BrokenStdout()
+        cli.os.dup2 = lambda *_args: None
+        cli.os.open = lambda *_args: 1
+        assert cli.main(["watch", "--jsonl"]) == 0
+    finally:
+        cli.sys.stdout, cli.os.dup2, cli.os.open = saved
 
 
 def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:

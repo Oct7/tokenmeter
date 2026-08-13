@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import unicodedata
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -118,6 +119,7 @@ def _short(path: Any) -> str:
 
 
 STREAM_TOTALS = ("input_tokens", "cache_read", "cache_write", "output_tokens", "cost_usd", "calls")
+PUBLIC_TOTALS = STREAM_TOTALS + ("cache_saved_usd",)
 
 
 def totals_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -128,20 +130,83 @@ def totals_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Optional[Dict
             for key, value in diff.items() if value > 0}
 
 
+def _public_totals(node: Any) -> Dict[str, Any]:
+    raw = node if isinstance(node, dict) else {}
+    return {
+        key: round(_float(raw.get(key)), 10) if key in ("cost_usd", "cache_saved_usd")
+        else int(_float(raw.get(key)))
+        for key in PUBLIC_TOTALS
+    }
+
+
+def _public_group(node: Any, model: bool = False) -> Dict[str, Any]:
+    raw = node if isinstance(node, dict) else {}
+    out: Dict[str, Any] = {}
+    for name, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        entry: Dict[str, Any] = {"totals": _public_totals(value.get("totals"))}
+        if "sessions" in value:
+            entry["sessions"] = int(_float(value.get("sessions")))
+        if "last_seen" in value:
+            entry["last_seen"] = _float(value.get("last_seen"))
+        if model and value.get("vendor"):
+            entry["vendor"] = str(value["vendor"])
+        out[str(name)] = entry
+    return out
+
+
+def _public_endpoints(node: Any) -> Dict[str, Any]:
+    raw = node if isinstance(node, dict) else {}
+    out: Dict[str, Any] = {}
+    for endpoint, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        label = classify(str(endpoint))
+        entry = out.setdefault(label, {"totals": _public_totals({}), "sessions": 0, "last_seen": 0.0})
+        totals = _public_totals(value.get("totals"))
+        for key, amount in totals.items():
+            entry["totals"][key] = (round(entry["totals"][key] + amount, 10)
+                                    if key in ("cost_usd", "cache_saved_usd")
+                                    else entry["totals"][key] + amount)
+        entry["sessions"] += int(_float(value.get("sessions")))
+        entry["last_seen"] = max(entry["last_seen"], _float(value.get("last_seen")))
+    return out
+
+
+def _public_days(node: Any) -> Dict[str, Any]:
+    raw = node if isinstance(node, dict) else {}
+    out: Dict[str, Any] = {}
+    for name, value in raw.items():
+        label = str(name)
+        try:
+            if date.fromisoformat(label).isoformat() != label:
+                continue
+        except ValueError:
+            continue
+        out[label] = _public_totals(value)
+    return out
+
+
 def public_snapshot(state: Dict[str, Any], record_type: str = "snapshot") -> Dict[str, Any]:
     sessions = [{
         "service": row["service"], "project": row["project"], "model": row["model"],
         "effort": row["effort"], "attention": row["attention"],
         "started_at": row["started_at"], "last_seen": row["last_seen"],
-        "ctx": row["ctx"], "ctx_window": row["ctx_win"], "totals": row["totals"],
+        "ctx": row["ctx"], "ctx_window": row["ctx_win"], "totals": _public_totals(row["totals"]),
     } for row in session_views(state)]
+    today = state.get("today") if isinstance(state.get("today"), dict) else {}
+    total = state.get("total") if isinstance(state.get("total"), dict) else {}
     return {
         "schema_version": 1, "type": record_type, "timestamp": time.time(),
-        "updated_at": state.get("updated_at", 0.0), "today": state.get("today", {}),
-        "total": state.get("total", {}), "days": state.get("days", {}),
-        "projects": state.get("projects", {}), "services": state.get("services", {}),
-        "models": state.get("models", {}), "vendors": state.get("vendors", {}),
-        "plans": state.get("plans", {}), "endpoints": state.get("endpoints", {}),
+        "updated_at": _float(state.get("updated_at")),
+        "today": {"date": str(today.get("date") or ""), "totals": _public_totals(today.get("totals"))},
+        "total": {"started_at": _float(total.get("started_at")), "last_seen": _float(total.get("last_seen")),
+                  "sessions": int(_float(total.get("sessions"))), "totals": _public_totals(total.get("totals"))},
+        "days": _public_days(state.get("days")),
+        "projects": _public_group(state.get("projects")), "services": _public_group(state.get("services")),
+        "models": _public_group(state.get("models"), model=True), "vendors": _public_group(state.get("vendors")),
+        "plans": _public_group(state.get("plans")), "endpoints": _public_endpoints(state.get("endpoints")),
         "sessions": sessions,
     }
 
