@@ -15,7 +15,7 @@ Claude Code / Codex / OpenCode 가 쓰는 토큰을 **자동으로** 재고,
 │ 세션                                 더블클릭 전환 │
 │ tokenmeter      opus-5[1m]  xhi     412/s       31% │  ← 라이브 세션은 금색, 끝은 ctx 점유
 │ hauswe         gpt-5.6-sol high     63/s       75% │
-│ api-server   sonnet-4-5  med       3/s       95% │  ← 90% 넘으면 빨강 (압축 임박)
+│ api-server   sonnet-4-5  med       3/s       95% │  ← 90% 넘으면 빨강 (높은 점유 경고)
 │ web-client  gemini-3-pro         1.2M           │  ← 창 크기를 모르면 빈칸
 │ 세션 7개 기록 · 라이브 4개                         │
 └────────────────────────────────────────────────────┘
@@ -26,7 +26,8 @@ Claude Code / Codex / OpenCode 가 쓰는 토큰을 **자동으로** 재고,
 지금 토큰을 태우고 있는 세션이 맨 위로 올라옵니다.
 
 **ctx% 는 그 세션의 컨텍스트가 얼마나 찼는지**입니다 (마지막 턴 기준). 90% 를 넘으면
-빨강 — 곧 압축이 일어난다는 뜻입니다. 창 크기를 모르는 모델은 아예 그리지 않습니다
+높은 점유 상태로 빨강 표시합니다. 이는 압축 시점이나 남은 시간을 예측하는 기능이 아닙니다.
+창 크기를 모르는 모델은 아예 그리지 않습니다
 (`tokenmeter price set <모델> --window N` 으로 알려주면 그때부터 나옵니다).
 벤더 칸은 확장 모드에서만 나옵니다 — 좁은 창에서는 모델명으로 짐작되는 벤더보다
 다른 데서 볼 방법이 없는 ctx% 가 그 자리를 씁니다.
@@ -40,7 +41,8 @@ Claude Code / Codex / OpenCode 가 쓰는 토큰을 **자동으로** 재고,
 > 그래프가 됩니다. 입력·캐시 총량은 아래 `^ v ~` 줄에서 봅니다.
 > 만땅 기준은 `settings.overlay.full_scale` (기본 300 출력 tok/s) 로 조정합니다.
 
-세션 상태는 다음 네 가지뿐입니다. `확인`은 사용자의 응답이나 권한 확인이 필요한 상태,
+세션 상태는 다음 네 가지뿐입니다. `확인`은 permission/question/stop 또는 attention-required
+같은 명시적 에이전트 이벤트가 있을 때만 표시되며, 조용함이나 비활동만으로 추론하지 않습니다.
 `작업`은 최근 토큰이 들어오는 상태, `대기`는 라이브지만 토큰 유입이 멈춘 상태,
 `종료`는 라이브 기록이 없는 상태입니다. Context Runway와 압축 시점 예측 기능은 구현하지 않았습니다.
 
@@ -321,8 +323,9 @@ API 요금제에서 `예상 사용액`, 구독에서 `API 환산 가치`, 알 �
 메시지만 출력합니다.
 
 `adapter init NAME --log PATH`는 최신 JSON/JSONL 레코드를 한 번 읽어 현재 디렉터리의
-`NAME-adapter/` 아래 `fixture.json`과 `service.yaml`만 만듭니다. 값은 fixture에 남기지
-않고 `service.yaml`의 `mode`, `key`, `match`는 `choose-delta-or-cumulative` 등
+`NAME-adapter/` 아래 `fixture.json`과 `service.yaml`만 만듭니다. 원래 값은 fixture에 남기지
+않고 일반 문자열·숫자·불리언은 빈 값·0·false로, secretish 키의 값은 `<redacted>`로
+바꿉니다. `service.yaml`의 `mode`, `key`, `match`는 `choose-delta-or-cumulative` 등
 미해결 선택으로 둡니다. 비어 있지 않은 대상은 덮어쓰지 않습니다. `adapter check PATH`는
 `mode`를 `delta` 또는 `cumulative`로 고르고 dot-path가 fixture 구조에 맞는지만 확인합니다.
 

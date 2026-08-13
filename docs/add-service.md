@@ -16,8 +16,9 @@ tokenmeter adapter check ./gemini-cli-adapter
 ```
 
 `init`은 최신 JSON/JSONL 레코드를 읽어 현재 디렉터리에 정확히 두 파일만 생성합니다.
-`fixture.json`에는 문자열·숫자·불리언 값을 남기지 않고, `service.yaml`에는 발견한
-dot-path만 채웁니다. `mode`는 `choose-delta-or-cumulative`로 남겨지므로 실제 로그가
+`fixture.json`에는 원래 값을 남기지 않고 일반 문자열·숫자·불리언을 빈 값·0·false로,
+secretish 키의 값은 `<redacted>`로 바꿉니다. `service.yaml`에는 발견한 dot-path만 채웁니다.
+`mode`는 `choose-delta-or-cumulative`로 남겨지므로 실제 로그가
 증분인지 누적인지 확인해 `delta` 또는 `cumulative`로 직접 바꿔야 합니다. `key`와
 `match`도 같은 이유로 미해결 상태입니다. 비어 있지 않은 대상 디렉터리는 덮어쓰지 않습니다.
 
