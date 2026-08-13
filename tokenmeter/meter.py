@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -38,23 +39,24 @@ ATTENTION_ORDER = {name: i for i, name in enumerate(("check", "working", "waitin
 
 def _int(v: Any) -> int:
     """state.json 은 사람이 고칠 수 있는 파일이다 — 숫자 자리에 뭐가 있어도 죽지 않는다."""
-    try:
-        return int(float(v))
-    except (TypeError, ValueError):
-        return 0
+    return int(_float(v))
 
 
 def _float(v: Any) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+    if isinstance(v, bool):
         return 0.0
+    try:
+        value = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return value if math.isfinite(value) else 0.0
 
 
 def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Dict[str, Any]]:
     """저장된 토큰 기록과 라이브 신호를 합쳐 세션별 주의 상태를 만든다."""
     now = time.time() if now is None else now
-    stored = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    raw_stored = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    stored = {str(key): value for key, value in raw_stored.items()}
     live_rows = state.get("live") if isinstance(state.get("live"), list) else []
     live = {
         f"{row.get('service') or '?'}/{row.get('session_id') or '?'}": row
@@ -75,17 +77,23 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
             attention = "working"
         else:
             attention = "waiting"
-        service, session_id = key.split("/", 1)
+        service, separator, session_id = key.partition("/")
+        if not separator:
+            service, session_id = "?", key
+        rec_service = rec.get("service") or (active or {}).get("service") or service
+        project = rec.get("project") or (active or {}).get("project") or "(unknown)"
+        model = rec.get("model") or (active or {}).get("model") or ""
         rows.append({
             "key": key,
-            "service": rec.get("service") or (active or {}).get("service") or service,
+            "service": rec_service if isinstance(rec_service, str) else service,
             "session_id": (active or {}).get("session_id") or session_id,
-            "project": rec.get("project") or (active or {}).get("project") or "(unknown)",
-            "model": rec.get("model") or (active or {}).get("model") or "",
+            "project": project if isinstance(project, str) else "(unknown)",
+            "model": model if isinstance(model, str) else "",
             "effort": rec.get("effort") or "", "vendor": rec.get("vendor") or "",
-            "plan": rec.get("plan") or "unknown", "started_at": rec.get("started_at") or
-            (active or {}).get("started_at") or 0.0, "last_seen": token_at,
-            "totals": dict(rec.get("totals") or {}), "ctx": _int(rec.get("ctx")),
+            "plan": rec.get("plan") or "unknown", "started_at": _float(
+                rec.get("started_at") or (active or {}).get("started_at")), "last_seen": token_at,
+            "totals": dict(rec.get("totals")) if isinstance(rec.get("totals"), dict) else {},
+            "ctx": _int(rec.get("ctx")),
             "ctx_win": _int(rec.get("ctx_win")), "sub_cost": _float(rec.get("sub_cost")),
             "attention": attention, "attention_at": signal_at, "live": active is not None,
         })
@@ -207,9 +215,10 @@ def tokens_of(totals: Any) -> int:
 def sessions_today(state: Dict[str, Any]) -> int:
     """오늘 활동한 세션 수. 보관 중인 최근 세션 기록에서 센다."""
     today = _today_str()
+    sessions = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
     return sum(
         1
-        for rec in (state.get("sessions") or {}).values()
+        for rec in sessions.values()
         if isinstance(rec, dict) and _day(rec.get("last_seen")) == today
     )
 

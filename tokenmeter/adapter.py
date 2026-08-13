@@ -15,6 +15,7 @@ import yaml
 from .config import TOKEN_FIELDS, dig, parse_service
 
 SECRETISH = re.compile(r"key|token|secret|password|credential|auth|cookie", re.IGNORECASE)
+SAFE_SCHEMA_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _ALIASES = {
     "input": ("input_tokens", "input", "prompt_tokens"),
@@ -28,12 +29,19 @@ _ALIASES = {
 
 
 def redact_fixture(value: Any, key: str = "") -> Any:
+    if isinstance(value, dict):
+        clean: Dict[str, Any] = {}
+        for raw_key, item in value.items():
+            child_key = str(raw_key)
+            if not SAFE_SCHEMA_KEY.fullmatch(child_key):
+                raise ValueError("객체 키는 안전한 스키마 식별자여야 합니다")
+            clean[child_key] = redact_fixture(item, child_key)
+        return "<redacted>" if key and SECRETISH.search(key) else clean
+    if isinstance(value, list):
+        clean_list = [redact_fixture(item) for item in value]
+        return "<redacted>" if key and SECRETISH.search(key) else clean_list
     if key and SECRETISH.search(key):
         return "<redacted>"
-    if isinstance(value, dict):
-        return {str(k): redact_fixture(v, str(k)) for k, v in value.items()}
-    if isinstance(value, list):
-        return [redact_fixture(item) for item in value]
     if isinstance(value, bool):
         return False
     if isinstance(value, str):
@@ -49,7 +57,7 @@ def _read_record(log_path: Path) -> Tuple[Optional[Dict[str, Any]], str]:
         try:
             with log_path.open(encoding="utf-8") as fh:
                 lines = deque(fh, maxlen=100)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             return None, f"로그를 읽을 수 없습니다: {exc}"
         for line in reversed(lines):
             try:
@@ -61,7 +69,7 @@ def _read_record(log_path: Path) -> Tuple[Optional[Dict[str, Any]], str]:
         return None, "유효한 JSON 객체를 찾지 못했습니다"
     try:
         value = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, f"로그를 읽을 수 없습니다: {exc}"
     if not isinstance(value, dict):
         return None, "JSON 로그는 객체여야 합니다"
@@ -100,15 +108,20 @@ def _find_path(paths: Dict[str, str], name: str) -> Optional[str]:
     return next((paths[alias] for alias in _ALIASES[name] if alias in paths), None)
 
 
-def _service_yaml(name: str, record: Dict[str, Any], log_path: Path) -> str:
+def _service_yaml(name: str, record: Dict[str, Any], log_path: Path, requested_path: Path) -> str:
     paths = _paths(record)
     fields = {field: _find_path(paths, field) for field in TOKEN_FIELDS}
     context = {field: _find_path(paths, field) for field in ("cwd", "model", "session")}
     fmt = "json" if log_path.suffix.lower() == ".json" else "jsonl"
     pattern = f"**/*.{fmt}"
+    root = (requested_path if requested_path.is_dir() else requested_path.parent).expanduser().resolve()
+    try:
+        root_text = (Path("~") / root.relative_to(Path.home().resolve())).as_posix()
+    except ValueError:
+        root_text = str(root)
     spec = {
         "services": {name: {
-            "enabled": True, "label": name, "roots": ["~/agent/logs"], "patterns": [pattern],
+            "enabled": True, "label": name, "roots": [root_text], "patterns": [pattern],
             "format": fmt, "mode": "choose-delta-or-cumulative", "key": None, "match": {},
             "fields": fields, "context": context, "default_model": "default",
             "install": {"target": "none"},
@@ -141,8 +154,11 @@ def init_adapter(name: str, log_path: Path, output: Path) -> Tuple[bool, str]:
     record, error = _read_record(selected)
     if record is None:
         return False, error
-    fixture_text = json.dumps(redact_fixture(record), ensure_ascii=False, indent=2) + "\n"
-    service_text = _service_yaml(name, record, selected)
+    try:
+        fixture_text = json.dumps(redact_fixture(record), ensure_ascii=False, indent=2) + "\n"
+    except ValueError as exc:
+        return False, f"로그를 익명화할 수 없습니다: {exc}"
+    service_text = _service_yaml(name, record, selected, log_path)
     created: List[Path] = []
     try:
         output.mkdir(parents=True, exist_ok=True)
@@ -181,4 +197,5 @@ def check_adapter(path: Path) -> Tuple[bool, List[str]]:
         for field, dot_path in fields.items():
             if dot_path and dig(fixture, dot_path) is None:
                 errors.append(f"{group}.{field}: {dot_path} 경로가 fixture.json에 없습니다")
-    return not errors, errors or [f"{name}: 구조 검증 통과"]
+    connected = ", ".join(f"{field}={path}" for field, path in spec.fields.items() if path)
+    return not errors, errors or [f"{name}: 구조 검증 통과 (연결된 토큰 필드: {connected or '없음'})"]

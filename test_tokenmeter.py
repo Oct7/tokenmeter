@@ -192,7 +192,10 @@ def test_adapter_check_requires_confirmed_mode_and_cli_runs(tmp: Path) -> None:
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         assert cli.main(["adapter", "check", str(out)]) == 0
-    assert output.getvalue().strip() == "sample: 구조 검증 통과"
+    assert output.getvalue().strip() == (
+        "sample: 구조 검증 통과 (연결된 토큰 필드: "
+        "input=usage.input_tokens, output=usage.output_tokens)"
+    )
 
 
 def test_adapter_redacts_nested_arrays_and_scalar_values(tmp: Path) -> None:
@@ -220,6 +223,61 @@ def test_adapter_directory_uses_most_recent_log(tmp: Path) -> None:
     assert fixture == {"fresh": {"input": 0}}
 
 
+def test_adapter_uses_requested_log_root_and_home_shorthand(tmp: Path) -> None:
+    """root는 선택된 파일명이 아니라 요청한 파일의 부모/디렉터리여야 한다."""
+    import yaml
+    from tokenmeter.adapter import init_adapter
+
+    file_log = tmp / "file-logs" / "private-name.json"
+    _write(file_log, json.dumps({"usage": {"output_tokens": 1}}))
+    file_out = tmp / "file-adapter"
+    assert init_adapter("file", file_log, file_out)[0]
+    file_service = yaml.safe_load((file_out / "service.yaml").read_text(encoding="utf-8"))["services"]["file"]
+    assert file_service["roots"] == [str(file_log.parent.resolve())]
+    assert file_service["patterns"] == ["**/*.json"]
+    assert "private-name" not in (file_out / "service.yaml").read_text(encoding="utf-8")
+
+    directory_log = tmp / "directory-logs"
+    _write(directory_log / "nested" / "latest.jsonl", json.dumps({"usage": {"output": 1}}))
+    directory_out = tmp / "directory-adapter"
+    assert init_adapter("directory", directory_log, directory_out)[0]
+    directory_service = yaml.safe_load(
+        (directory_out / "service.yaml").read_text(encoding="utf-8"))["services"]["directory"]
+    assert directory_service["roots"] == [str(directory_log.resolve())]
+    assert directory_service["patterns"] == ["**/*.jsonl"]
+
+    fake_home = tmp / "home"
+    home_log = fake_home / "agent" / "logs" / "private.json"
+    _write(home_log, json.dumps({"usage": {"input": 1}}))
+    previous_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(fake_home)
+    try:
+        home_out = tmp / "home-adapter"
+        assert init_adapter("home", home_log, home_out)[0]
+    finally:
+        if previous_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = previous_home
+    home_text = (home_out / "service.yaml").read_text(encoding="utf-8")
+    home_service = yaml.safe_load(home_text)["services"]["home"]
+    assert home_service["roots"] == ["~/agent/logs"]
+    assert str(fake_home) not in home_text
+
+
+def test_adapter_rejects_content_like_object_keys_before_writing(tmp: Path) -> None:
+    """동적 파일명·경로·명령 키는 값이 지워져도 스키마로 남아서는 안 된다."""
+    from tokenmeter.adapter import init_adapter
+
+    for index, unsafe_key in enumerate(("secret.txt", "../private/path", "git status")):
+        log = tmp / f"unsafe-{index}.json"
+        _write(log, json.dumps({"safe": {"auth": {unsafe_key: {"output_tokens": 1}}}}))
+        out = tmp / f"unsafe-{index}-adapter"
+        ok, error = init_adapter("sample", log, out)
+        assert not ok and "객체 키" in error and unsafe_key not in error
+        assert not out.exists()
+
+
 def test_adapter_parse_failures_create_no_files(tmp: Path) -> None:
     """깨진 JSON/JSONL은 출력 디렉터리조차 만들지 않아야 한다."""
     from tokenmeter.adapter import init_adapter
@@ -229,6 +287,13 @@ def test_adapter_parse_failures_create_no_files(tmp: Path) -> None:
         log.write_text(content, encoding="utf-8")
         out = tmp / f"{suffix}-adapter"
         assert not init_adapter("sample", log, out)[0]
+        assert not out.exists()
+    for suffix, content in (("json", b'{"safe":"\xff"}'), ("jsonl", b'{"safe":"\xff"}\n')):
+        log = tmp / f"invalid-utf8.{suffix}"
+        log.write_bytes(content)
+        out = tmp / f"invalid-utf8-{suffix}-adapter"
+        ok, error = init_adapter("sample", log, out)
+        assert not ok and error.startswith("로그를 읽을 수 없습니다:")
         assert not out.exists()
 
 
@@ -816,8 +881,23 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
         assert team[0].me and (team[2].check, team[2].working, team[2].waiting, team[2].risk) == (0, 0, 0, 0)
         malformed = parse_team_entries([{"handle": "bad", "today": {"attention": {
             "check": "NaN", "working": "Infinity", "waiting": "-Infinity", "risk": object(),
-        }}}], "")
-        assert [(entry.check, entry.working, entry.waiting, entry.risk) for entry in malformed] == [(0, 0, 0, 0)]
+        }, "cost_usd": float("nan")}}], "")
+        assert [(entry.check, entry.working, entry.waiting, entry.risk, entry.cost_usd)
+                for entry in malformed] == [(0, 0, 0, 0, 0.0)]
+        for invalid in (-1, float("nan"), float("inf"), float("-inf"), True, object()):
+            entry = parse_team_entries([{"handle": "bad", "today": {
+                "cost_usd": invalid, "attention": {
+                    "check": invalid, "working": invalid, "waiting": invalid, "risk": invalid,
+                }}}], "")[0]
+            assert (entry.check, entry.working, entry.waiting, entry.risk, entry.cost_usd) == (
+                0, 0, 0, 0, 0.0)
+            json.dumps(entry.__dict__, allow_nan=False)
+        valid = parse_team_entries([{"handle": "valid", "today": {
+            "cost_usd": "1.25", "attention": {
+                "check": 2.9, "working": "3", "waiting": 0, "risk": 1,
+            }}}], "")[0]
+        assert (valid.check, valid.working, valid.waiting, valid.risk, valid.cost_usd) == (
+            2, 3, 0, 1, 1.25)
 
         # endpoint 가 없으면 네트워크를 안 타고 나 혼자 나온다
         board = Leaderboard(Config(services={}, settings={}))
@@ -1315,7 +1395,19 @@ def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
             secret_url: {"totals": {"output_tokens": 7, "meta": metadata}, "meta": metadata},
             "https://api.openai.com/v1": {"totals": {"output_tokens": 3}},
         },
-        "sessions": {},
+        "sessions": {
+            "codex/secret-id": {
+                "service": "codex", "project": "api", "model": "gpt-5",
+                "effort": "private-effort", "started_at": now - 10,
+                "last_seen": now - 2, "ctx": 20, "ctx_win": 100,
+                "totals": {"output_tokens": 777777},
+            },
+            "codex/completed-secret-id": {
+                "service": "codex", "project": "completed-private", "model": "secret-model",
+                "effort": "private-completed-effort", "started_at": now - 20,
+                "last_seen": now - 15, "totals": {"output_tokens": 888888},
+            },
+        },
         "live": [{"service": "codex", "session_id": "secret-id", "project": "api",
                   "cwd": "/secret/path", "routing_env": {"OPENAI_BASE_URL": "secret"},
                   "attention": "working", "attention_at": now - 1}],
@@ -1324,12 +1416,19 @@ def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
     raw = json.dumps(out)
     assert out["schema_version"] == 1 and out["type"] == "snapshot"
     assert "secret-id" not in raw and "/secret/path" not in raw and "routing_env" not in raw
+    assert "private-effort" not in raw and "completed-private" not in raw
+    assert "777777" not in raw and "888888" not in raw
     assert secret_url not in raw and metadata not in raw
     assert set(out["endpoints"]) == {"self-hosted", "api.openai.com"}
     assert out["endpoints"]["self-hosted"]["totals"]["output_tokens"] == 7
     assert out["projects"]["api"]["totals"]["output_tokens"] == 7
     assert out["models"]["gpt-5"]["vendor"] == "openai"
-    assert out["sessions"][0]["attention"] == "working"
+    assert len(out["sessions"]) == 1 and out["sessions"][0]["attention"] == "working"
+    assert set(out["sessions"][0]) == {
+        "service", "project", "model", "attention", "started_at", "last_seen",
+        "attention_at", "ctx", "ctx_window",
+    }
+    assert out["sessions"][0]["ctx"] == 20 and out["sessions"][0]["ctx_window"] == 100
 
 
 def test_status_json_is_one_clean_public_object(tmp: Path) -> None:
@@ -1340,6 +1439,13 @@ def test_status_json_is_one_clean_public_object(tmp: Path) -> None:
         "TOKENMETER_HOME": str(tmp / "state"),
         "XDG_CONFIG_HOME": str(tmp / "config"),
     }
+    state_dir = tmp / "state"
+    state_dir.mkdir()
+    (state_dir / "state.json").write_text(json.dumps({
+        "updated_at": {}, "sessions": ["broken"],
+        "today": {"date": "2026-08-14", "totals": ["broken"]},
+        "total": ["broken"],
+    }), encoding="utf-8")
     result = subprocess.run(
         [sys.executable, "-m", "tokenmeter.cli", "status", "--json"],
         cwd=tmp,
@@ -1349,7 +1455,47 @@ def test_status_json_is_one_clean_public_object(tmp: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
-    assert json.loads(result.stdout)["type"] == "snapshot"
+    snapshot = json.loads(result.stdout)
+    assert snapshot["type"] == "snapshot" and snapshot["sessions"] == []
+    assert snapshot["today"]["totals"]["input_tokens"] == 0
+
+
+def test_read_only_views_degrade_on_malformed_session_state(tmp: Path) -> None:
+    """깨진 로컬 세션 구조·숫자는 status/receipt 읽기 경로를 죽이지 않는다."""
+    from tokenmeter.cli import format_receipt, public_snapshot, receipt_data
+    from tokenmeter.meter import session_views, sessions_today
+
+    state = {
+        "sessions": {
+            "broken-key": {
+                "project": {"private": "value"}, "started_at": {}, "last_seen": 1,
+                "ctx": object(), "ctx_win": "Infinity", "sub_cost": [], "totals": ["broken"],
+            },
+            "codex/live": {
+                "service": "codex", "project": "api", "model": "gpt",
+                "started_at": "NaN", "last_seen": {}, "ctx": "-Infinity",
+                "ctx_win": float("inf"), "totals": {"input_tokens": {}, "cost_usd": "NaN"},
+            },
+        },
+        "live": [{"service": "codex", "session_id": "live", "attention": "working",
+                  "attention_at": "Infinity", "started_at": []}],
+    }
+    rows = {row["key"]: row for row in session_views(state, now=10)}
+    assert rows["broken-key"]["attention"] == "done" and rows["broken-key"]["ctx_win"] == 0
+    assert rows["codex/live"]["live"] and rows["codex/live"]["last_seen"] == 0.0
+    snapshot = public_snapshot(state)
+    assert len(snapshot["sessions"]) == 1 and snapshot["sessions"][0]["ctx_window"] == 0
+    json.dumps(snapshot, allow_nan=False)
+    assert public_snapshot({"sessions": []})["sessions"] == []
+    assert sessions_today({"sessions": []}) == 0
+
+    receipt = receipt_data(state)
+    assert receipt and receipt["project"] == "(unknown)"
+    assert receipt["amount_usd"] == 0.0 and receipt["ctx_percent"] is None
+    assert receipt["totals"]["input_tokens"] == 0
+    assert len(format_receipt(receipt, "text").splitlines()) == 5
+    json.dumps(json.loads(format_receipt(receipt, "json")), allow_nan=False)
+    assert receipt_data({"sessions": []}) is None
 
 
 def test_totals_delta_reports_increases_and_reset(tmp: Path) -> None:
@@ -2043,11 +2189,17 @@ def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
     }}
     data = receipt_data(state)
     assert data and data["project"] == "api" and data["money_label"] == "API 환산 가치"
-    assert "API 환산 가치 $4.00" in format_receipt(data, "text")
+    assert format_receipt(data, "text") == "\n".join([
+        "TokenMeter 영수증", "api · codex · gpt-5.6-sol",
+        "1분 · 입력 10 · 캐시 읽기 20 · 캐시 쓰기 3 · 출력 7 · 2 호출",
+        "API 환산 가치 $4.00 · 캐시 절감 $2.00",
+        "ctx 25% · 서브에이전트 25%",
+    ])
     assert json.loads(format_receipt(data, "json"))["type"] == "receipt"
     assert format_receipt(data, "markdown") == "\n".join([
         "### TokenMeter 영수증", "- api · codex · gpt-5.6-sol",
-        "- 1분 · 40 토큰 · 2 호출", "- API 환산 가치 $4.00 · 캐시 절감 $2.00",
+        "- 1분 · 입력 10 · 캐시 읽기 20 · 캐시 쓰기 3 · 출력 7 · 2 호출",
+        "- API 환산 가치 $4.00 · 캐시 절감 $2.00",
         "- ctx 25% · 서브에이전트 25%",
     ])
 

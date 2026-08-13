@@ -192,10 +192,10 @@ def _public_days(node: Any) -> Dict[str, Any]:
 def public_snapshot(state: Dict[str, Any], record_type: str = "snapshot") -> Dict[str, Any]:
     sessions = [{
         "service": row["service"], "project": row["project"], "model": row["model"],
-        "effort": row["effort"], "attention": row["attention"],
-        "started_at": row["started_at"], "last_seen": row["last_seen"],
-        "ctx": row["ctx"], "ctx_window": row["ctx_win"], "totals": _public_totals(row["totals"]),
-    } for row in session_views(state)]
+        "attention": row["attention"], "started_at": row["started_at"],
+        "last_seen": row["last_seen"], "attention_at": row["attention_at"],
+        "ctx": row["ctx"], "ctx_window": row["ctx_win"],
+    } for row in session_views(state) if row["live"]]
     today = state.get("today") if isinstance(state.get("today"), dict) else {}
     total = state.get("total") if isinstance(state.get("total"), dict) else {}
     return {
@@ -216,36 +216,43 @@ MONEY_LABELS = {"api": "예상 사용액", "subscription": "API 환산 가치"}
 
 
 def receipt_data(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    rows = [row for row in (state.get("sessions") or {}).values() if isinstance(row, dict)]
+    sessions = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    rows = [row for row in sessions.values() if isinstance(row, dict)]
     if not rows:
         return None
-    rec = max(rows, key=lambda row: float(row.get("last_seen") or 0.0))
-    totals = dict(rec.get("totals") or {})
-    cost = float(totals.get("cost_usd") or 0.0)
-    window = float(rec.get("ctx_win") or 0.0)
+    rec = max(rows, key=lambda row: _float(row.get("last_seen")))
+    totals = _public_totals(rec.get("totals"))
+    cost = max(0.0, _float(totals.get("cost_usd")))
+    window = max(0.0, _float(rec.get("ctx_win")))
+    started_at, last_seen = _float(rec.get("started_at")), _float(rec.get("last_seen"))
+    plan = rec.get("plan") if isinstance(rec.get("plan"), str) else "unknown"
     return {
-        "schema_version": 1, "type": "receipt", "project": rec.get("project") or "(unknown)",
-        "service": rec.get("service") or "", "model": rec.get("model") or "",
-        "effort": rec.get("effort") or "", "plan": rec.get("plan") or "unknown",
-        "started_at": float(rec.get("started_at") or 0.0),
-        "last_seen": float(rec.get("last_seen") or 0.0),
-        "duration_seconds": max(0.0, float(rec.get("last_seen") or 0.0) - float(rec.get("started_at") or 0.0)),
-        "totals": totals, "money_label": MONEY_LABELS.get(str(rec.get("plan")), "API 환산가"),
-        "amount_usd": cost, "ctx_percent": round(100 * float(rec.get("ctx") or 0.0) / window, 1) if window else None,
-        "subagent_percent": round(100 * float(rec.get("sub_cost") or 0.0) / cost, 1) if cost else 0.0,
+        "schema_version": 1, "type": "receipt",
+        "project": rec.get("project") if isinstance(rec.get("project"), str) and rec.get("project") else "(unknown)",
+        "service": rec.get("service") if isinstance(rec.get("service"), str) else "",
+        "model": rec.get("model") if isinstance(rec.get("model"), str) else "",
+        "effort": rec.get("effort") if isinstance(rec.get("effort"), str) else "",
+        "plan": plan, "started_at": started_at, "last_seen": last_seen,
+        "duration_seconds": max(0.0, last_seen - started_at),
+        "totals": totals, "money_label": MONEY_LABELS.get(plan, "API 환산가"),
+        "amount_usd": cost,
+        "ctx_percent": round(100 * max(0.0, _float(rec.get("ctx"))) / window, 1) if window else None,
+        "subagent_percent": round(100 * max(0.0, _float(rec.get("sub_cost"))) / cost, 1) if cost else 0.0,
     }
 
 
 def format_receipt(data: Dict[str, Any], format_name: str) -> str:
     totals = data["totals"]
-    tokens = tokens_of(totals)
     minutes = int(data["duration_seconds"] // 60)
     identity = " · ".join(str(data[key]) for key in ("project", "service", "model") if data.get(key))
     amount = f"{data['money_label']} ${data['amount_usd']:.2f}"
     context = "-" if data["ctx_percent"] is None else f"{data['ctx_percent']:g}%"
     lines = [
         "TokenMeter 영수증", identity,
-        f"{minutes}분 · {tokens:,} 토큰 · {int(totals.get('calls') or 0)} 호출",
+        f"{minutes}분 · 입력 {int(totals.get('input_tokens') or 0):,} · "
+        f"캐시 읽기 {int(totals.get('cache_read') or 0):,} · "
+        f"캐시 쓰기 {int(totals.get('cache_write') or 0):,} · "
+        f"출력 {int(totals.get('output_tokens') or 0):,} · {int(totals.get('calls') or 0)} 호출",
         f"{amount} · 캐시 절감 ${float(totals.get('cache_saved_usd') or 0):.2f}",
         f"ctx {context} · 서브에이전트 {data['subagent_percent']:g}%",
     ]

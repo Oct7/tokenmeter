@@ -59,18 +59,23 @@ class TeamEntry:
 
 
 def _num(v: Any, default: float = 0.0) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+    if isinstance(v, bool):
         return default
+    try:
+        value = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 def _count(v: Any) -> int:
+    if isinstance(v, bool):
+        return 0
     try:
         value = float(v)
     except (TypeError, ValueError, OverflowError):
         return 0
-    return int(value) if math.isfinite(value) else 0
+    return max(0, int(value)) if math.isfinite(value) else 0
 
 
 def _totals(node: Any) -> Dict[str, float]:
@@ -87,7 +92,7 @@ def tokens_of(totals: Any) -> int:
 
 
 def cost_of(totals: Any) -> float:
-    return _num(_totals(totals).get("cost_usd"))
+    return max(0.0, _num(_totals(totals).get("cost_usd")))
 
 
 def bucket(node: Any) -> Dict[str, Any]:

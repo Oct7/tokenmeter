@@ -2,7 +2,7 @@
 
 **See when your AI coding agents are working, waiting, or running out of context.**
 
-TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. It discovers active sessions, shows whether they need attention, are working, waiting, or done, and keeps usage history locally.
+TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. It discovers active sessions, shows `확인` (needs attention), `작업` (working), `대기` (waiting), or `종료` (done), and keeps usage history locally.
 
 [한국어](README.ko.md) · [Advanced reference](docs/reference.ko.md) · [Add an agent](docs/add-service.md)
 
@@ -22,10 +22,10 @@ TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. 
 
 ## Why TokenMeter
 
-- **Know what needs attention.** Sessions are labeled check, working, waiting, or done.
+- **Know what needs attention.** Sessions use the actual UI labels `확인`, `작업`, `대기`, and `종료`.
 - **See context pressure.** Context pressure changes color at 70% and 90%; Context Runway or compaction prediction is not implemented.
 - **Understand usage locally.** Inspect tokens, estimated API-equivalent cost, cache savings, projects, models, and daily history.
-- **Stop watching terminals.** A desktop notification fires after an active session becomes quiet.
+- **Stop watching terminals.** A desktop notification fires only on an explicit transition to `확인`.
 
 TokenMeter reads local agent logs. It does not require an API key, store prompt contents in its state, or make network requests by default.
 
@@ -95,11 +95,11 @@ It provides `/tm`, `/tm-meter`, `/tm-measure`, and `/tm-doctor`.
 
 ## Privacy and data
 
-- Attention files store event name and time only. Prompt text, responses, tool commands, project paths, filenames, and session contents are not stored or transmitted.
-- Public JSON omits internal paths, session IDs, and routing URLs. Adapter fixtures erase values before writing them.
+- Local live files contain allowlisted session/routing metadata plus normalized event and attention timestamps. They never contain prompt or response text, tool commands, or filenames.
+- Public JSON and team output apply stricter filters, omitting internal paths, session IDs, routing URLs, and session content. Adapter fixtures erase values before writing them.
 - Runtime state lives in `~/Library/Application Support/tokenmeter` on macOS or `${XDG_STATE_HOME:-~/.local/state}/tokenmeter` on Linux.
 - User overrides live in `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`.
-- The optional self-hosted leaderboard is disabled by default. Team sync sends only aggregate attention counts nested under `today` through that existing endpoint; it is not a hosted TokenMeter service.
+- The optional self-hosted leaderboard is disabled by default. Team sync reuses that endpoint; its only added live-session data is aggregate attention counts under `today`. TokenMeter does not host the service.
 
 ## Update or remove
 
