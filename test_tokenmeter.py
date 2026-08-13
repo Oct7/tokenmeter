@@ -990,6 +990,60 @@ def test_attention_views(tmp: Path) -> None:
     }
 
 
+def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
+    from tokenmeter.cli import public_snapshot
+
+    now = time.time()
+    state = {
+        "updated_at": now,
+        "today": {"date": "2026-08-14", "totals": {"output_tokens": 7}},
+        "total": {"totals": {"output_tokens": 7}},
+        "sessions": {},
+        "live": [{"service": "codex", "session_id": "secret-id", "project": "api",
+                  "cwd": "/secret/path", "routing_env": {"OPENAI_BASE_URL": "secret"},
+                  "attention": "working", "attention_at": now - 1}],
+    }
+    out = public_snapshot(state)
+    raw = json.dumps(out)
+    assert out["schema_version"] == 1 and out["type"] == "snapshot"
+    assert "secret-id" not in raw and "/secret/path" not in raw and "routing_env" not in raw
+    assert out["sessions"][0]["attention"] == "working"
+
+
+def test_status_json_is_one_clean_public_object(tmp: Path) -> None:
+    root = Path(__file__).resolve().parent
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(root),
+        "TOKENMETER_HOME": str(tmp / "state"),
+        "XDG_CONFIG_HOME": str(tmp / "config"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "tokenmeter.cli", "status", "--json"],
+        cwd=tmp,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["type"] == "snapshot"
+
+
+def test_totals_delta_reports_increases_and_reset(tmp: Path) -> None:
+    from tokenmeter.cli import totals_delta
+
+    before = {"input_tokens": 2, "cache_read": 3, "cache_write": 4,
+              "output_tokens": 5, "cost_usd": 0.1, "calls": 1}
+    after = {"input_tokens": 4, "cache_read": 3, "cache_write": 5,
+             "output_tokens": 8, "cost_usd": 0.125, "calls": 2}
+    assert totals_delta(before, after) == {
+        "input_tokens": 2, "cache_write": 1, "output_tokens": 3,
+        "cost_usd": 0.025, "calls": 1,
+    }
+    assert totals_delta(after, before) is None
+
+
 def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
     """훅은 정규화된 상태만 저장하고 Stop은 세션을 종료하지 않는다."""
     from tokenmeter import hook

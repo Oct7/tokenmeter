@@ -117,6 +117,35 @@ def _short(path: Any) -> str:
     return "~" + text[len(home) :] if text.startswith(home) else text
 
 
+STREAM_TOTALS = ("input_tokens", "cache_read", "cache_write", "output_tokens", "cost_usd", "calls")
+
+
+def totals_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    diff = {key: float(after.get(key) or 0) - float(before.get(key) or 0) for key in STREAM_TOTALS}
+    if any(value < 0 for value in diff.values()):
+        return None
+    return {key: int(value) if key != "cost_usd" else round(value, 10)
+            for key, value in diff.items() if value > 0}
+
+
+def public_snapshot(state: Dict[str, Any], record_type: str = "snapshot") -> Dict[str, Any]:
+    sessions = [{
+        "service": row["service"], "project": row["project"], "model": row["model"],
+        "effort": row["effort"], "attention": row["attention"],
+        "started_at": row["started_at"], "last_seen": row["last_seen"],
+        "ctx": row["ctx"], "ctx_window": row["ctx_win"], "totals": row["totals"],
+    } for row in session_views(state)]
+    return {
+        "schema_version": 1, "type": record_type, "timestamp": time.time(),
+        "updated_at": state.get("updated_at", 0.0), "today": state.get("today", {}),
+        "total": state.get("total", {}), "days": state.get("days", {}),
+        "projects": state.get("projects", {}), "services": state.get("services", {}),
+        "models": state.get("models", {}), "vendors": state.get("vendors", {}),
+        "plans": state.get("plans", {}), "endpoints": state.get("endpoints", {}),
+        "sessions": sessions,
+    }
+
+
 # ── 데몬 상태 ──────────────────────────────────────────────────────────────
 
 
@@ -586,6 +615,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     """토큰/랭킹/라이브 세션 현황."""
     config = load_config()
     state = Meter(config, read_only=True).status()
+    if args.json:
+        print(json.dumps(public_snapshot(state), ensure_ascii=False))
+        return 0
     total = state.get("total", {}).get("totals", {})
     today = state.get("today", {}).get("totals", {})
     pid = _daemon_pid()
@@ -797,6 +829,49 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     """로그 감시만 실행 (오버레이 없음)."""
+    if args.jsonl:
+        meter = Meter(load_config(), read_only=True)
+        state = meter.status()
+        previous_totals = (state.get("total") or {}).get("totals") or {}
+        previous_updated_at = state.get("updated_at", 0.0)
+        previous_attention = tuple(sorted(
+            (row["service"], row["project"], row["started_at"], row["attention"], row["attention_at"])
+            for row in session_views(state)
+        ))
+
+        def emit(record: Dict[str, Any]) -> None:
+            sys.stdout.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+        emit(public_snapshot(state))
+        try:
+            while True:
+                time.sleep(0.5)
+                meter.reload()
+                state = meter.status()
+                totals = (state.get("total") or {}).get("totals") or {}
+                updated_at = state.get("updated_at", 0.0)
+                attention = tuple(sorted(
+                    (row["service"], row["project"], row["started_at"], row["attention"], row["attention_at"])
+                    for row in session_views(state)
+                ))
+                reset = False
+                if updated_at != previous_updated_at:
+                    delta = totals_delta(previous_totals, totals)
+                    if delta is None:
+                        emit(public_snapshot(state))
+                        reset = True
+                    elif delta:
+                        record = public_snapshot(state, "delta")
+                        record["delta"] = delta
+                        emit(record)
+                if attention != previous_attention and not reset:
+                    emit(public_snapshot(state, "attention"))
+                previous_totals = totals
+                previous_updated_at = updated_at
+                previous_attention = attention
+        except KeyboardInterrupt:
+            return 0
     pid = _daemon_pid()
     if pid:
         # state.json 은 통째로 덮어쓰기라 writer 가 둘이면 나중에 쓴 쪽이 상대 누적치를 지운다
@@ -1022,6 +1097,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("status", cmd_status, "토큰/랭킹/라이브 세션 현황")
     p.add_argument("--scope", choices=("today", "total"), default="today", help="랭킹 기준 구간")
     p.add_argument("--sync", action="store_true", help="랭킹을 지금 업로드·조회한다")
+    p.add_argument("--json", action="store_true", help="공개 상태를 JSON으로 출력")
 
     p = add("price", cmd_price, "모델 단가 조회 / 직접 지정 (가격표에 없는 모델)")
     p.add_argument("action", nargs="?", choices=("set", "unset"), help="생략하면 조회")
@@ -1044,6 +1120,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("watch", cmd_watch, "로그 감시만 실행 (오버레이 없음)")
     p.add_argument("--service", action="append", help="감시할 서비스 (여러 번 지정 가능)")
+    p.add_argument("--jsonl", action="store_true", help="읽기 전용 상태 스트림을 JSONL로 출력")
 
     add("overlay", cmd_overlay, "오버레이만 실행 (읽기 전용)")
 
