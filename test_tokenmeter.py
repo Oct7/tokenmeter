@@ -814,6 +814,10 @@ def test_leaderboard_offline_and_ranking(tmp: Path) -> None:
         ], "alpha")
         assert [entry.handle for entry in team] == ["alpha", "beta", "legacy"]
         assert team[0].me and (team[2].check, team[2].working, team[2].waiting, team[2].risk) == (0, 0, 0, 0)
+        malformed = parse_team_entries([{"handle": "bad", "today": {"attention": {
+            "check": "NaN", "working": "Infinity", "waiting": "-Infinity", "risk": object(),
+        }}}], "")
+        assert [(entry.check, entry.working, entry.waiting, entry.risk) for entry in malformed] == [(0, 0, 0, 0)]
 
         # endpoint 가 없으면 네트워크를 안 타고 나 혼자 나온다
         board = Leaderboard(Config(services={}, settings={}))
@@ -883,6 +887,83 @@ def test_team_cli_outputs_allowlisted_local_entry(tmp: Path) -> None:
     assert "secret-project" not in output.getvalue() and "/secret/path" not in output.getvalue()
     assert "핸들" in text_output.getvalue() and "확인" in text_output.getvalue()
     assert "endpoint" not in text_output.getvalue()
+
+
+def test_team_online_sync_merges_local_entry_and_status(tmp: Path) -> None:
+    """온라인 team은 동기화 행에 최신 로컬 행을 합치고 상태문구를 보존한다."""
+    from tokenmeter import leaderboard as lb_mod
+
+    saved = lb_mod.CACHE_FILE
+    lb_mod.CACHE_FILE = tmp / "leaderboard.json"
+    try:
+        now = time.time()
+        state = {
+            "today": {"totals": {"cost_usd": 0.5}},
+            "sessions": {"codex/s": {
+                "service": "codex", "last_seen": now, "ctx": 190_000, "ctx_win": 200_000,
+            }},
+            "live": [{"service": "codex", "session_id": "s", "attention": "check", "attention_at": now}],
+        }
+        board = Leaderboard(Config(services={}, settings={"leaderboard": {
+            "handle": "alice", "endpoint": "https://team.example.test/board",
+        }}))
+        methods: List[str] = []
+
+        def request(method: str, _body: Any) -> Any:
+            methods.append(method)
+            return None if method == "POST" else {"entries": [
+                {"handle": "friend", "today": {"cost_usd": 5, "attention": {"check": 2}}},
+                {"handle": "alice", "today": {"cost_usd": 99, "attention": {"check": 9}}},
+            ]}
+
+        board._request = request  # type: ignore[method-assign]
+        board.sync(state, force=True)
+        team, note = board.team(state)
+        assert methods == ["POST", "GET"]
+        assert [entry.handle for entry in team] == ["friend", "alice"]
+        assert (team[1].check, team[1].risk, team[1].cost_usd, team[1].me) == (1, 1, 0.5, True)
+        assert note.startswith("동기화 ") and note.endswith("2명")
+        board._cache["status"] = "동기화 실패: URLError"
+        assert board.team(state)[1] == "동기화 실패: URLError"
+    finally:
+        lb_mod.CACHE_FILE = saved
+
+
+def test_team_cli_online_sync_uses_existing_transport(tmp: Path) -> None:
+    """team --sync은 실제 Leaderboard 전송 경로를 거쳐 정규화 JSON을 출력한다."""
+    from tokenmeter import cli, leaderboard as lb_mod, meter as meter_mod
+
+    saved_cache, saved_state, saved_live = lb_mod.CACHE_FILE, meter_mod.STATE_FILE, meter_mod.LIVE_DIR
+    saved_config, saved_request = cli.load_config, lb_mod.Leaderboard._request
+    lb_mod.CACHE_FILE, meter_mod.STATE_FILE, meter_mod.LIVE_DIR = tmp / "leaderboard.json", tmp / "state.json", tmp / "live"
+    meter_mod.STATE_FILE.write_text(json.dumps({"today": {"totals": {"cost_usd": 0.5}}}), encoding="utf-8")
+    config = Config(services={}, settings={"leaderboard": {
+        "handle": "alice", "endpoint": "https://team.example.test/board",
+    }})
+    methods: List[str] = []
+
+    def request(_self: Any, method: str, _body: Any) -> Any:
+        methods.append(method)
+        return None if method == "POST" else {"entries": [
+            {"handle": "friend", "today": {"cost_usd": 5, "attention": {"check": 2}}},
+        ]}
+
+    cli.load_config = lambda: config  # type: ignore[assignment]
+    lb_mod.Leaderboard._request = request  # type: ignore[assignment]
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            assert cli.main(["team", "--sync", "--json"]) == 0
+    finally:
+        cli.load_config, lb_mod.Leaderboard._request = saved_config, saved_request
+        lb_mod.CACHE_FILE, meter_mod.STATE_FILE, meter_mod.LIVE_DIR = saved_cache, saved_state, saved_live
+    result = json.loads(output.getvalue())
+    assert methods == ["POST", "GET"]
+    assert [entry["handle"] for entry in result["members"]] == ["friend", "alice"]
+    assert result["members"][1] == {
+        "handle": "alice", "check": 0, "working": 0, "waiting": 0, "risk": 0,
+        "cost_usd": 0.5, "me": True,
+    }
 
 
 def test_cost_usd(tmp: Path) -> None:

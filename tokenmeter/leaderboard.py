@@ -17,6 +17,7 @@ writer 는 데몬 하나다. 데몬이 sync() 로 캐시 파일을 갱신하고,
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
@@ -62,6 +63,14 @@ def _num(v: Any, default: float = 0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _count(v: Any) -> int:
+    try:
+        value = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return int(value) if math.isfinite(value) else 0
 
 
 def _totals(node: Any) -> Dict[str, float]:
@@ -191,10 +200,10 @@ def parse_team_entries(raw: Any, me: str) -> List[TeamEntry]:
         attention = today.get("attention") if isinstance(today.get("attention"), dict) else {}
         out.append(TeamEntry(
             handle=handle,
-            check=int(_num(attention.get("check"))),
-            working=int(_num(attention.get("working"))),
-            waiting=int(_num(attention.get("waiting"))),
-            risk=int(_num(attention.get("risk"))),
+            check=_count(attention.get("check")),
+            working=_count(attention.get("working")),
+            waiting=_count(attention.get("waiting")),
+            risk=_count(attention.get("risk")),
             cost_usd=cost_of(today),
             me=handle == me,
         ))
