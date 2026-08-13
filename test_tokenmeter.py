@@ -1370,6 +1370,53 @@ def test_attention_notice_key(tmp: Path) -> None:
     assert attention_notice_key({"key": "codex/s", "attention": "working"}) == ("", 0.0)
 
 
+def test_attention_notifications_respect_setting_and_check_transition(tmp: Path) -> None:
+    """확인 알림은 설정을 따르고 세션의 새 확인 전환에만 한 번 울린다."""
+    from tokenmeter import cli
+
+    def run(settings: Dict[str, Any], timestamps: List[float]) -> List[tuple[str, str]]:
+        class Meter:
+            state = {"sessions": {"codex/s": {"project": "api", "last_seen": 90.0}}}
+
+            def __init__(self) -> None:
+                self.index = 0
+
+            def prune_live(self, _ttl: float) -> None:
+                pass
+
+            def live_sessions(self) -> List[Dict[str, Any]]:
+                at = timestamps[self.index]
+                self.index += 1
+                return [{"service": "codex", "session_id": "s", "attention": "check",
+                         "attention_at": at}]
+
+        class Stop:
+            def __init__(self) -> None:
+                self.ticks = 0
+
+            def is_set(self) -> bool:
+                return self.ticks == len(timestamps)
+
+            def wait(self, _seconds: float) -> None:
+                self.ticks += 1
+
+        notices: List[tuple[str, str]] = []
+        original_notify = cli.notify
+        cli.notify = lambda title, message: notices.append((title, message)) or True
+        try:
+            cli._idle_loop(Meter(), Config(services={}, settings=settings), Stop())
+        finally:
+            cli.notify = original_notify
+        return notices
+
+    assert run({"attention_notify": False, "idle_notify_seconds": 90}, [100.0]) == []
+    assert run({"idle_notify_seconds": 0}, [100.0]) == []
+    assert run({"idle_notify_seconds": 90}, [100.0, 100.0, 101.0]) == [
+        ("TokenMeter", "api · 확인 필요"),
+        ("TokenMeter", "api · 확인 필요"),
+    ]
+
+
 def test_runtime_paths_and_legacy_copy(tmp: Path) -> None:
     """설치 패키지 밖에 상태를 쓰고, 옛 데이터는 원본을 남긴 채 한 번만 복사한다."""
     old_env = dict(os.environ)
