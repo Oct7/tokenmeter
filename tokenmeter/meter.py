@@ -29,7 +29,7 @@ from .config import (
     load_config,
 )
 from .pricing import cache_savings, cost_usd
-from .rates import RATES_KEPT, add_rate, active_seconds, rate_slot
+from .rates import RATES_KEPT, active_seconds, add_rate, rate_key, rate_slot
 
 STATE_VERSION = 2
 DAYS_KEPT = 60  # 일별 히스토리 보관 일수 (state.json 이 무한정 커지지 않게)
@@ -86,6 +86,7 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
         project = rec.get("project") or (active or {}).get("project") or "(unknown)"
         model = rec.get("model") or (active or {}).get("model") or ""
         totals = dict(rec.get("totals")) if isinstance(rec.get("totals"), dict) else {}
+        sub_output = min(_int(totals.get("output_tokens")), _int(rec.get("sub_output_tokens")))
         event = (active or {}).get("event") or rec.get("event") or ""
         cwd = (active or {}).get("cwd") or rec.get("cwd") or ""
         rows.append({
@@ -99,6 +100,8 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
                 rec.get("started_at") or (active or {}).get("started_at")), "last_seen": token_at,
             "totals": totals,
             "cost_usd": _float(totals.get("cost_usd")),
+            "main_output_tokens": max(0, _int(totals.get("output_tokens")) - sub_output),
+            "sub_output_tokens": sub_output,
             "ctx": _int(rec.get("ctx")),
             "ctx_win": _int(rec.get("ctx_win")), "sub_cost": _float(rec.get("sub_cost")),
             "attention": attention, "attention_at": signal_at, "live": active is not None,
@@ -487,20 +490,35 @@ class Meter:
             }
             book[key] = rec
             st["total"]["sessions"] = int(st["total"].get("sessions", 0)) + 1
-        rec["model"] = delta.model  # 마지막으로 쓴 모델
-        if delta.effort:  # 없는 서비스도 있다 — 빈 값으로 덮어써서 지우면 안 된다
-            rec["effort"] = delta.effort
-        if delta.subagent:  # 세션 비용에 이미 들어가 있다 — 그중 얼마인지만 따로 남긴다
+        if not delta.subagent:
+            # 세션 행의 모델/속도는 메인 에이전트를 뜻한다. 부모 sessionId 를 공유하는
+            # 서브에이전트가 이 값을 덮으면 여러 모델의 합산 속도가 한 모델처럼 보인다.
+            rec["model"] = delta.model
+            if delta.vendor:
+                rec["vendor"] = delta.vendor
+            if delta.plan:
+                rec["plan"] = delta.plan
+            if delta.endpoint:
+                rec["endpoint"] = delta.endpoint
+            if delta.effort:  # 없는 서비스도 있다 — 빈 값으로 덮어써서 지우면 안 된다
+                rec["effort"] = delta.effort
+        else:  # 전체에는 이미 들어가 있으므로, 메인 출력에서 뺄 몫만 병행 집계한다
             rec["sub_cost"] = _float(rec.get("sub_cost")) + cost
+            rec["sub_output_tokens"] = _int(rec.get("sub_output_tokens")) + delta.output_tokens
         if delta.ctx_tokens:  # 누적이 아니라 '마지막 턴의' 점유 — 압축되면 같이 내려간다
             rec["ctx"] = delta.ctx_tokens
             # 창은 세션 안에서 줄지 않는다. 롱컨텍스트 세션은 200k 를 넘겨야 드러나므로
             # (로그에 창 크기가 없다) 한 번 커진 창을 되돌리면 ctx% 가 튄다
             rec["ctx_win"] = max(delta.ctx_window, _int(rec.get("ctx_win")))
         rec["last_seen"] = now
-        if delta.output_tokens > 0:
-            gap = active_seconds(rec.get("out_at"), now)
-            rec["out_at"] = now
+        if delta.output_tokens > 0 and not delta.subagent:
+            # 모델 처리량은 메인 모델만 센다. 부모와 sessionId 를 공유하는 서브 스트림까지
+            # 넣으면 마지막 서브 모델 옆에 여러 에이전트의 처리량이 합쳐져 보인다.
+            stream = rate_key(delta.vendor, delta.model)
+            previous = rec.get("out_at") if rec.get("out_model") == stream else 0.0
+            gap = active_seconds(previous, now)
+            rec["out_at"] = now       # 기존 state/도구가 읽는 마지막 메인 출력 시각
+            rec["out_model"] = stream
             if gap > 0:
                 book = self.state.setdefault("rate", {"h": rate_slot(now), "m": {}})
                 add_rate(book.setdefault("m", {}), delta.vendor, delta.model,
