@@ -9,7 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -102,7 +102,7 @@ def chips(windows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
         tag = SHORT[src]
         used = row.get("used")
         if used is not None:
-            text = f"{tag} {row.get('label') or '?'} {float(used) * 100:.0f}%"
+            text = f"{tag} {row.get('label') or '?'} · {float(used) * 100:.0f}% 사용"
         elif row.get("remaining_usd") is not None:
             text = f"{tag} ${float(row['remaining_usd']):.1f}"
         else:

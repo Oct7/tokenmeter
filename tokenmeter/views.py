@@ -53,12 +53,26 @@ def money_caption(approx: bool, amount: Any) -> str:
     return f"환산 {text}" if approx else text
 
 
+def cost_caption(approx: bool, amount: Any) -> str:
+    """오버레이 상단용 비용 문구. 구독분은 청구액으로 오해하지 않게 명시한다."""
+    text = money_caption(False, amount)
+    return f"API 환산 {text}" if approx else f"비용 {text}"
+
+
 def ctx_caption(ratio: float, has_window: bool) -> str:
     if not has_window:
         return "창?"
     if ratio >= 0.90:
         return "높음"
     return f"{max(0.0, ratio) * 100:.0f}%"
+
+
+def ctx_status_caption(ratio: float, has_window: bool) -> str:
+    """정확한 점유율과 미상 상태를 모두 보존하는 세션 표 문구."""
+    if not has_window:
+        return "미상"
+    pct = f"{max(0.0, ratio) * 100:.0f}%"
+    return f"{pct} · 높음" if ratio >= 0.90 else pct
 
 
 def health_note(status: Dict[str, Any], now: float) -> str:
