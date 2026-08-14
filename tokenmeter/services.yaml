@@ -202,6 +202,48 @@ services:
       target: opencode_plugin
       path: ~/.config/opencode/plugin/tokenmeter.js
       events: [SessionStart]
+
+  grok:
+    enabled: true
+    label: Grok CLI
+    roots: ["~/.grok/sessions"]
+    patterns: ["**/updates.jsonl"]
+    format: jsonl
+    match:
+      params.update.sessionUpdate: turn_completed
+    # turn_completed 는 그 턴 하나의 사용량이다 (세션 누적이 아니다)
+    mode: delta
+    key: params._meta.eventId
+    input_includes_cache: true
+    fields:
+      input: params.update.usage.inputTokens
+      cache_read: params.update.usage.cachedReadTokens
+      cache_write: params.update.usage.cacheCreationTokens
+      output: params.update.usage.outputTokens
+    # 지금 컨텍스트 점유는 스트리밍 줄(tool_call/agent_message_chunk)에만 있고
+    # turn_completed 에는 없다. 비워 두면 그 턴이 부른 API 호출 전부의 입력 합계를
+    # 컨텍스트로 오인해 ctx% 가 늘 100% 가 되므로, 없는 경로를 못 박아 ctx% 를 비운다.
+    ctx_tokens: params._meta.totalTokens
+    # cwd 는 레코드에 없다 (세션 디렉토리 이름에만 있다). 프로젝트명은 훅이 남긴
+    # 라이브 파일에서 온다 — 같은 sessionId 로 붙는다.
+    context:
+      session: params.sessionId
+    # 모델명은 usage.modelUsage 의 '키' 라서 dot-path 로 집을 수 없다
+    default_model: grok-4.6-build
+    vendor: xai
+    plan_probe:
+      path: ~/.grok/models_cache.json
+      key: auth_method
+      map: {session: subscription, api_key: api}
+      default: unknown
+    endpoint_probe:
+      path: ~/.grok/models_cache.json
+      key: origin
+      default: https://api.x.ai/v1
+    # Grok CLI 는 ~/.claude/settings.json 의 훅을 그대로 실행한다(compat.claude).
+    # 따로 설치할 훅 파일이 없어 로그만 본다.
+    install:
+      target: none
 # ── 새 서비스 추가 예시 ──────────────────────────────────────────────────
 #  gemini-cli:
 #    enabled: true

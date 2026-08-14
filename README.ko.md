@@ -27,7 +27,7 @@ TokenMeter는 Claude Code, Codex, OpenCode를 위한 로컬 우선 데스크톱 
 - **사용량을 로컬에서 이해합니다.** 토큰, API 환산 비용, 캐시 절감, 프로젝트, 모델, 일별 기록을 확인합니다.
 - **터미널을 계속 보지 않아도 됩니다.** 세션이 명시적으로 `확인`으로 전환될 때만 데스크톱 알림이 옵니다.
 
-TokenMeter는 로컬 에이전트 로그를 읽습니다. API 키가 필요 없고, 프롬프트 내용을 상태에 저장하지 않으며, 기본 설정에서는 네트워크 요청을 하지 않습니다.
+TokenMeter는 로컬 에이전트 로그를 읽습니다. API 키가 필요 없고 프롬프트 내용도 저장하지 않습니다. 측정 자체는 로컬에서만 이뤄집니다. 선택형 한도 화면은 이미 로그인된 Claude, Codex, Grok 자격 증명으로 잔여 플랜 창을 읽습니다.
 
 ## 설치
 
@@ -61,6 +61,7 @@ tokenmeter install
 | Claude Code | 지원 | 지원 |
 | Codex | 지원 | 지원 |
 | OpenCode | 지원 | 지원, 플러그인 자동 생성 |
+| Grok CLI | 지원 | 지원, Grok 이 읽는 Claude Code 훅을 그대로 탄다 |
 
 로그가 있는 다른 에이전트도 설정만으로 추가할 수 있습니다. [서비스 추가 가이드](docs/add-service.md)를 참고하세요.
 
@@ -73,6 +74,7 @@ tokenmeter receipt --format markdown
 tokenmeter adapter init gemini-cli --log ~/.gemini/tmp
 tokenmeter adapter check ./gemini-cli-adapter
 tokenmeter team --sync
+tokenmeter quota                  # Claude/Codex/Grok 잔여 한도
 tokenmeter services               # 로그 감지와 훅 상태
 tokenmeter doctor                 # 파서와 설치 검증
 tokenmeter meter off              # 창만 숨기고 측정은 유지
@@ -99,6 +101,7 @@ npx skills add Oct7/tokenmeter -g -a claude-code
 - 공개 JSON과 팀 출력은 더 엄격히 걸러 내부 경로·세션 ID·라우팅 URL·세션 내용을 제외합니다. 어댑터 fixture는 값을 지운 뒤 생성합니다.
 - macOS 상태 경로는 `~/Library/Application Support/tokenmeter`, Linux는 `${XDG_STATE_HOME:-~/.local/state}/tokenmeter`입니다.
 - 사용자 설정은 `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`에 있습니다.
+- 선택형 한도 화면과 `tokenmeter quota`는 Claude, Codex, Grok CLI가 이미 저장한 자격 증명으로 잔여 플랜 창을 읽습니다. 세션 로그와 프롬프트 내용은 보내지 않습니다.
 - 선택형 자체 호스팅 랭킹은 기본적으로 꺼져 있습니다. 팀 동기화는 기존 endpoint를 재사용하며, 새 라이브 세션 정보로는 `today` 안의 관심 상태 집계만 추가합니다. TokenMeter는 호스팅 서비스를 제공하지 않습니다.
 
 ## 업데이트와 제거

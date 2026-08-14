@@ -27,7 +27,7 @@ TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. 
 - **Understand usage locally.** Inspect tokens, estimated API-equivalent cost, cache savings, projects, models, and daily history.
 - **Stop watching terminals.** A desktop notification fires only on an explicit transition to `확인`.
 
-TokenMeter reads local agent logs. It does not require an API key, store prompt contents in its state, or make network requests by default.
+TokenMeter reads local agent logs. It does not require an API key or store prompt contents. Metering stays local. The optional quota view uses already-logged-in Claude, Codex, or Grok credentials to read remaining plan windows.
 
 ## Install
 
@@ -61,6 +61,7 @@ Existing TokenPet hooks and local data are detected and copied safely. The old f
 | Claude Code | Yes | Yes |
 | Codex | Yes | Yes |
 | OpenCode | Yes | Yes, generated plugin |
+| Grok CLI | Yes | Yes, through the Claude Code hooks it already reads |
 
 Adding another log-based agent is configuration-only. See [the service guide](docs/add-service.md).
 
@@ -73,6 +74,7 @@ tokenmeter receipt --format markdown
 tokenmeter adapter init gemini-cli --log ~/.gemini/tmp
 tokenmeter adapter check ./gemini-cli-adapter
 tokenmeter team --sync
+tokenmeter quota                  # remaining Claude/Codex/Grok plan windows
 tokenmeter services               # detected logs and hook state
 tokenmeter doctor                 # validate parsers and installation
 tokenmeter meter off              # hide overlay; keep measuring
@@ -99,6 +101,7 @@ It provides `/tm`, `/tm-meter`, `/tm-measure`, and `/tm-doctor`.
 - Public JSON and team output apply stricter filters, omitting internal paths, session IDs, routing URLs, and session content. Adapter fixtures erase values before writing them.
 - Runtime state lives in `~/Library/Application Support/tokenmeter` on macOS or `${XDG_STATE_HOME:-~/.local/state}/tokenmeter` on Linux.
 - User overrides live in `${XDG_CONFIG_HOME:-~/.config}/tokenmeter`.
+- The optional quota view and `tokenmeter quota` read remaining plan windows from Claude, Codex, or Grok using credentials already stored by those CLIs. Session logs and prompt contents are not sent.
 - The optional self-hosted leaderboard is disabled by default. Team sync reuses that endpoint; its only added live-session data is aggregate attention counts under `today`. TokenMeter does not host the service.
 
 ## Update or remove

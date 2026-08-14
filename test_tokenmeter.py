@@ -67,6 +67,28 @@ OPENCODE_RECORD: Dict[str, Any] = {
 }
 
 
+def _grok_record(event_id: str, inp: int, cached: int, cache_write: int, out: int,
+                 reasoning: int = 0) -> Dict[str, Any]:
+    return {
+        "method": "_x.ai/session/update",
+        "params": {
+            "sessionId": "sess-grok-1",
+            "_meta": {"eventId": event_id},
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "usage": {
+                    "inputTokens": inp,
+                    "cachedReadTokens": cached,
+                    "cacheCreationTokens": cache_write,
+                    "outputTokens": out,
+                    "reasoningTokens": reasoning,
+                    "totalTokens": inp + out,
+                },
+            },
+        },
+    }
+
+
 def _codex_record(inp: int, cached: int, cache_write: int, out: int, reasoning: int,
                   last: int = 0, window: int = 0) -> Dict[str, Any]:
     return {
@@ -126,14 +148,19 @@ def _vec(delta: TokenDelta) -> tuple:
 def _state_file(tmp: Path):
     """Meter 가 실제 data/state.json · hours.jsonl 대신 임시 파일을 쓰게 한다."""
     from tokenmeter import meter as meter_mod
+    from tokenmeter import rates as rates_mod
 
-    original = (meter_mod.STATE_FILE, meter_mod.HOURS_FILE)
+    original = (meter_mod.STATE_FILE, meter_mod.HOURS_FILE, meter_mod.RATES_FILE,
+                rates_mod.RATES_FILE)
     meter_mod.STATE_FILE = tmp / "state.json"
     meter_mod.HOURS_FILE = tmp / "hours.jsonl"
+    meter_mod.RATES_FILE = tmp / "rates.jsonl"
+    rates_mod.RATES_FILE = tmp / "rates.jsonl"
     try:
         yield
     finally:
-        meter_mod.STATE_FILE, meter_mod.HOURS_FILE = original
+        (meter_mod.STATE_FILE, meter_mod.HOURS_FILE, meter_mod.RATES_FILE,
+         rates_mod.RATES_FILE) = original
 
 
 # ── 테스트 ─────────────────────────────────────────────────────────────────
@@ -465,6 +492,40 @@ def test_opencode_json(tmp: Path) -> None:
     # 같은 내용이 다시 쓰여도 증가분 0
     _write(path, json.dumps(done))
     assert reader.poll() == 0
+
+
+def test_grok_jsonl(tmp: Path) -> None:
+    """Grok CLI: turn_completed 한 줄 = 그 턴의 사용량, eventId 로 중복을 막는다."""
+    root = tmp / "sessions"
+    path = root / "%2FUsers%2Fdev" / "sess-grok-1" / "updates.jsonl"
+    _write_lines(path, [
+        # 스트리밍 줄에는 컨텍스트 점유가 있지만 토큰 사용량이 없다 → 먹지 않는다
+        {"method": "_x.ai/session/update",
+         "params": {"sessionId": "sess-grok-1", "_meta": {"totalTokens": 100986},
+                    "update": {"sessionUpdate": "agent_message_chunk"}}},
+        _grok_record("e-1", 1174839, 1052672, 0, 12855, reasoning=7308),
+    ])
+
+    got: List[TokenDelta] = []
+    reader = ServiceReader(_spec("grok", root), got.append)
+    assert reader.poll() == 1
+    delta = got[0]
+    assert delta.input_tokens == 1174839 - 1052672, delta.input_tokens  # input 은 캐시를 포함
+    assert delta.output_tokens == 12855, "reasoningTokens 를 더하면 안 된다"
+    assert _vec(delta) == (122167, 1052672, 0, 12855)
+    assert delta.model == "grok-4.6-build" and delta.vendor == "xai"
+    assert delta.session == "sess-grok-1"
+    # 컨텍스트 점유는 turn_completed 에 없다 — 턴 입력 합계로 ctx% 를 지어내면 안 된다
+    assert delta.ctx_tokens == 0
+
+    # 같은 eventId 가 다시 들어와도 두 번 먹지 않는다
+    _write_lines(path, [_grok_record("e-1", 1174839, 1052672, 0, 12855)], append=True)
+    assert reader.poll() == 0
+
+    got.clear()
+    _write_lines(path, [_grok_record("e-2", 20000, 15000, 100, 300)], append=True)
+    assert reader.poll() == 1
+    assert _vec(got[0]) == (5000, 15000, 100, 300), _vec(got[0])
 
 
 def test_prime_skips_history(tmp: Path) -> None:
@@ -2212,6 +2273,8 @@ def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
     assert "ctx - · 서브에이전트 0%" in format_receipt(unknown, "text")
 
     assert receipt_data({"sessions": {}}) is None
+    keyed = receipt_data(state, "claude-code/old")
+    assert keyed and keyed["project"] == "old" and keyed["amount_usd"] == 9
     class EmptyMeter:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.state = {"sessions": {}}
@@ -2225,6 +2288,337 @@ def test_receipt_uses_plan_specific_money_label(tmp: Path) -> None:
     finally:
         cli.Meter = saved_meter
     assert output.getvalue().strip() == "영수증을 만들 세션이 없습니다."
+
+
+def test_active_rate_slots_and_fallback(tmp: Path) -> None:
+    """작업 중 출력만 tok/s 로 모으고, 빈 창은 마지막 데이터가 있는 같은 길이 구간으로 민다."""
+    from tokenmeter.rates import (
+        active_seconds, rate_series, rate_slot, slot_end,
+    )
+
+    noon = time.mktime((2026, 8, 14, 15, 7, 0, 0, 0, -1))
+    assert rate_slot(noon) == "2026-08-14T15:00"
+    assert rate_slot(noon + 8 * 60) == "2026-08-14T15:15"
+    assert slot_end("2026-08-14T15:00") == noon - 7 * 60 + 15 * 60
+
+    assert active_seconds(None, 100) == 0
+    assert active_seconds(100.0, 110.0) == 10.0
+    assert active_seconds(100.0, 140.0) == 0.0
+    assert active_seconds(110.0, 100.0) == 0.0
+
+    buckets = [
+        ("2026-08-14T10:00", {
+            "anthropic/opus-5": [3000, 60.0, 1],
+            "openai/gpt-5.6": [400, 20.0, 1],
+        }),
+        ("2026-08-14T10:15", {"anthropic/opus-5": [1500, 30.0, 1]}),
+    ]
+    later = time.mktime((2026, 8, 14, 18, 0, 0, 0, 0, -1))
+    hour = rate_series(buckets, "1h", now=later)
+    assert hour.shifted and hour.rows
+    by_key = {f"{row.vendor}/{row.model}": row for row in hour.rows}
+    assert round(by_key["anthropic/opus-5"].rate, 1) == 50.0  # 4500 / 90
+    assert round(by_key["openai/gpt-5.6"].rate, 1) == 20.0
+    assert by_key["anthropic/opus-5"].tokens == 4500
+
+    live = time.mktime((2026, 8, 14, 10, 20, 0, 0, 0, -1))
+    same = rate_series(buckets, "1h", now=live)
+    assert not same.shifted
+    assert same.rows[0].vendor == "anthropic"
+
+    empty = rate_series([], "7d", now=later)
+    assert empty.rows == [] and empty.shifted is False and empty.peak == 0.0
+
+    four = rate_series(buckets, "4h", now=live)
+    week = rate_series(buckets, "7d", now=live)
+    assert four.bars and week.bars
+    assert any(bar.rate > 0 for bar in four.bars)
+    assert week.rows and week.rows[0].vendor == "anthropic"
+
+
+def test_meter_records_active_output_rate(tmp: Path) -> None:
+    """같은 세션에서 30초 안 출력 유입만 속도 버킷에 들어간다."""
+    with _state_file(tmp):
+        meter = Meter(Config(services={}, settings={}))
+        first = TokenDelta(
+            output_tokens=80, session="s1", service="claude-code",
+            vendor="anthropic", model="opus-5", project="api",
+        )
+        meter.ingest(first)
+        rec = meter.state["sessions"]["claude-code/s1"]
+        assert rec.get("out_at")
+        assert meter.state["rate"]["m"] == {}
+
+        rec["out_at"] = time.time() - 10
+        meter.ingest(TokenDelta(
+            output_tokens=200, session="s1", service="claude-code",
+            vendor="anthropic", model="opus-5", project="api",
+        ))
+        cell = meter.state["rate"]["m"]["anthropic/opus-5"]
+        assert cell[0] == 200
+        assert 8.0 <= cell[1] <= 12.0
+
+        rec = meter.state["sessions"]["claude-code/s1"]
+        rec["out_at"] = time.time() - 45
+        meter.ingest(TokenDelta(
+            output_tokens=500, session="s1", service="claude-code",
+            vendor="anthropic", model="opus-5",
+        ))
+        assert meter.state["rate"]["m"]["anthropic/opus-5"][0] == 200, "끊긴 버스트는 안 넣는다"
+
+        meter.state["rate"]["h"] = "2020-01-01T00:00"
+        meter.ingest(TokenDelta(
+            output_tokens=1, session="s1", service="claude-code",
+            vendor="anthropic", model="opus-5",
+        ))
+        from tokenmeter import meter as meter_mod
+
+        lines = meter_mod.RATES_FILE.read_text(encoding="utf-8").splitlines()
+        done = json.loads(lines[0])
+        assert done["h"] == "2020-01-01T00:00"
+        assert done["m"]["anthropic/opus-5"][0] == 200
+
+        meter.reset_stats()
+        assert meter.state["rate"]["m"] == {}
+        assert not meter_mod.RATES_FILE.exists()
+
+
+def test_overlay_view_helpers(tmp: Path) -> None:
+    """헤더·비용·컨텍스트·건강 문구는 오버레이가 아니라 순수 함수가 만든다."""
+    from tokenmeter.views import (
+        check_reason, ctx_caption, filter_sessions, header_attention,
+        health_note, money_caption, project_label,
+    )
+
+    assert check_reason("PermissionRequest") == "권한"
+    assert check_reason("question.asked") == "질문"
+    assert check_reason("Stop") == "중지"
+    assert check_reason("session.idle") == "중지"
+    assert check_reason("") == ""
+
+    assert project_label("frontend", "/Users/me/shop/frontend") == "shop/frontend"
+    assert project_label("tokenmeter", "") == "tokenmeter"
+
+    assert money_caption(True, 15.8599) == "환산 $15.86"
+    assert money_caption(False, 15.8599) == "$15.86"
+    assert money_caption(True, 0.0123) == "환산 $0.01"
+
+    assert ctx_caption(0.95, True) == "높음"
+    assert ctx_caption(0.4, True) == "40%"
+    assert ctx_caption(0.0, False) == "창?"
+
+    now = 10_000.0
+    assert health_note({}, now).startswith("첫 세션 대기 중")
+    assert "측정이 멈춤" in health_note({
+        "live_count": 1, "updated_at": now - 200,
+        "sessions": {"a": {}},
+    }, now)
+    assert health_note({
+        "live_count": 1, "updated_at": now - 10,
+        "sessions": {"a": {}},
+    }, now) == ""
+
+    counts = {"check": 2, "working": 1, "waiting": 0, "risk": 0}
+    assert header_attention(counts, "api-server") == "확인 2 · api-server"
+    assert header_attention({"check": 0, "working": 1}, "") == ""
+
+    rows = [
+        {"attention": "check", "live": True, "project": "a"},
+        {"attention": "working", "live": True, "project": "b"},
+        {"attention": "done", "live": False, "project": "c"},
+    ]
+    assert [r["project"] for r in filter_sessions(rows, "check")] == ["a"]
+    assert [r["project"] for r in filter_sessions(rows, "live")] == ["a", "b"]
+    assert len(filter_sessions(rows, "all")) == 3
+
+
+def test_session_views_include_event_and_cwd(tmp: Path) -> None:
+    from tokenmeter.meter import session_views
+
+    now = 10_000.0
+    rows = {row["key"]: row for row in session_views({
+        "sessions": {"claude-code/a": {
+            "service": "claude-code", "project": "api", "last_seen": now - 5,
+            "totals": {"output_tokens": 1, "cost_usd": 0.4},
+        }},
+        "live": [{"service": "claude-code", "session_id": "a", "attention": "check",
+                  "attention_at": now - 1, "event": "PermissionRequest",
+                  "cwd": "/tmp/shop/api", "updated_at": now - 1}],
+    }, now)}
+    assert rows["claude-code/a"]["event"] == "PermissionRequest"
+    assert rows["claude-code/a"]["cwd"] == "/tmp/shop/api"
+    assert rows["claude-code/a"]["cost_usd"] == 0.4
+
+
+def test_quota_parses_provider_payloads(tmp: Path) -> None:
+    """한도는 프로바이더 응답을 정규화한다. 로컬 토큰으로 잔여를 추정하지 않는다."""
+    from tokenmeter.quota import chips, parse_claude, parse_codex, parse_grok, reset_caption
+
+    now = 1_800_000_000.0
+    claude = parse_claude({
+        "five_hour": {"utilization": 38.0, "resets_at": "2027-01-01T12:00:00Z"},
+        "seven_day": {"utilization": 15.0, "resets_at": "2027-01-07T00:00:00Z"},
+        "seven_day_sonnet": {"utilization": 91.0, "resets_at": "2027-01-03T00:00:00Z"},
+        "extra_usage": {"is_enabled": True, "monthly_limit": 100000, "used_credits": 2500},
+    }, now)
+    kinds = {row["kind"]: row for row in claude}
+    assert kinds["session"]["used"] == 0.38 and kinds["session"]["label"] == "5h"
+    assert parse_claude({"seven_day": {"utilization": 1.0}}, now)[0]["used"] == 0.01
+    assert kinds["weekly"]["used"] == 0.15
+    assert kinds["weekly_scoped"]["label"] == "Sonnet 주" and kinds["weekly_scoped"]["status"] == "exhausted"
+    assert kinds["credits"]["remaining_usd"] == 975.0 and kinds["credits"]["cap_usd"] == 1000.0
+
+    structured = parse_claude({
+        "limits": [
+            {"kind": "session", "percent": 10, "resets_at": "2027-01-01T00:00:00Z"},
+            {"kind": "weekly_all", "percent": 20, "resets_at": "2027-01-08T00:00:00Z"},
+            {"kind": "weekly_scoped", "percent": 30, "resets_at": "2027-01-04T00:00:00Z",
+             "scope": {"model": {"display_name": "Fable"}}},
+        ],
+    }, now)
+    assert [row["label"] for row in structured] == ["5h", "주간", "Fable 주"]
+
+    codex = parse_codex({
+        "plan_type": "plus",
+        "rate_limit": {
+            "primary_window": {"used_percent": 72, "reset_after_seconds": 3600},
+            "secondary_window": {"used_percent": 48, "reset_at": now + 4 * 86400},
+        },
+        "credits": {"balance": 12.4, "unlimited": False},
+    }, now)
+    assert [row["label"] for row in codex] == ["5h", "주간", "크레딧"]
+    assert codex[0]["used"] == 0.72 and codex[0]["status"] == "warn"
+    assert codex[2]["remaining_usd"] == 12.4
+    weekly = parse_codex({
+        "rate_limit": {"primary_window": {
+            "used_percent": 1, "limit_window_seconds": 604800, "reset_after_seconds": 100,
+        }},
+        "credits": {"balance": 0, "has_credits": False},
+    }, now)
+    assert weekly[0]["label"] == "주간" and weekly[0]["used"] == 0.01
+    assert all(row["kind"] != "credits" for row in weekly)
+
+    grok = parse_grok({
+        "config": {
+            "creditUsagePercent": 22.0,
+            "currentPeriod": {"end": "2027-02-01T00:00:00Z"},
+        },
+    }, now)
+    assert grok[0]["source"] == "grok" and grok[0]["used"] == 0.22
+    ratio = parse_grok({
+        "monthlyLimit": {"val": 20000},
+        "usage": {"totalUsed": {"val": 5000}},
+        "billingCycle": {"billingPeriodEnd": "2027-02-01T00:00:00Z"},
+    }, now)
+    assert ratio[0]["used"] == 0.25
+
+    assert reset_caption(now + 90, now) == "1분"
+    assert reset_caption(now + 3 * 3600, now) == "3시간"
+    assert reset_caption(now + 6 * 86400, now) == "6일"
+    texts = [text for text, _status in chips(claude + codex + grok)]
+    assert texts[0].startswith("CC ") and "5h" in texts[0]
+    assert any(text.startswith("CDX ") for text in texts)
+    assert any(text.startswith("GRK ") for text in texts)
+
+
+def test_quota_refresh_uses_injected_http_and_cache(tmp: Path) -> None:
+    """갱신은 TTL 안이면 네트워크를 다시 치지 않고, 실패하면 직전 값을 stale 로 남긴다."""
+    from tokenmeter import config, quota
+
+    leftover = config.DATA_DIR / "quota.json"
+    leftover.unlink(missing_ok=True)
+    calls = {"n": 0}
+
+    def fake_get(url: str, headers: Dict[str, str], timeout: float = 8.0) -> Dict[str, Any]:
+        calls["n"] += 1
+        if "anthropic" in url:
+            return {"five_hour": {"utilization": 10, "resets_at": "2027-01-01T00:00:00Z"}}
+        if "wham" in url:
+            return {"rate_limit": {"primary_window": {"used_percent": 20, "reset_after_seconds": 60}}}
+        if "billing" in url:
+            return {"config": {"creditUsagePercent": 30, "billingPeriodEnd": "2027-02-01T00:00:00Z"}}
+        raise AssertionError(url)
+
+    home = tmp / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir()
+    (home / ".grok").mkdir()
+    (home / ".claude" / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "tok-cc", "expiresAt": 9_999_999_999_000},
+    }), encoding="utf-8")
+    (home / ".codex" / "auth.json").write_text(json.dumps({
+        "tokens": {"access_token": "tok-cdx", "account_id": "acct-1"},
+    }), encoding="utf-8")
+    (home / ".grok" / "auth.json").write_text(json.dumps({
+        "https://auth.x.ai::demo": {
+            "key": "tok-grok", "expires_at": "2099-01-01T00:00:00Z",
+        },
+    }), encoding="utf-8")
+
+    old_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        first = quota.refresh(now=1000.0, get_json=fake_get, homes={
+            "claude": home / ".claude" / ".credentials.json",
+            "codex": home / ".codex" / "auth.json",
+            "grok": home / ".grok" / "auth.json",
+        })
+        assert calls["n"] == 3
+        assert {row["source"] for row in first["windows"]} == {"claude-code", "codex", "grok"}
+        cached = quota.refresh(now=1100.0, get_json=fake_get, homes={
+            "claude": home / ".claude" / ".credentials.json",
+            "codex": home / ".codex" / "auth.json",
+            "grok": home / ".grok" / "auth.json",
+        })
+        assert calls["n"] == 3 and cached["windows"][0]["used"] == 0.10
+
+        def boom(url: str, headers: Dict[str, str], timeout: float = 8.0) -> Dict[str, Any]:
+            raise quota.QuotaError("down")
+
+        stale = quota.refresh(force=True, now=2000.0, get_json=boom, homes={
+            "claude": home / ".claude" / ".credentials.json",
+            "codex": home / ".codex" / "auth.json",
+            "grok": home / ".grok" / "auth.json",
+        })
+        assert all(row["status"] == "stale" for row in stale["windows"])
+        assert stale["errors"]
+    finally:
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+        path = config.DATA_DIR / "quota.json"
+        if path.exists():
+            path.unlink()
+
+
+def test_quota_cli_prints_windows(tmp: Path) -> None:
+    from tokenmeter.quota import save
+
+    save({
+        "updated_at": 1_800_000_000.0,
+        "windows": [{
+            "source": "claude-code", "title": "Claude Code", "plan": "subscription",
+            "kind": "session", "label": "5h", "used": 0.38, "remaining_usd": None,
+            "cap_usd": None, "resets_at": 1_800_003_600.0, "status": "ok",
+            "note": "", "fetched_at": 1_800_000_000.0,
+        }],
+        "errors": {},
+    })
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parent),
+        "TOKENMETER_HOME": os.environ["TOKENMETER_HOME"],
+        "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
+    }
+    result = subprocess.run(
+        [sys.executable, "-m", "tokenmeter.cli", "quota", "--json", "--cached"],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    body = json.loads(result.stdout)
+    assert body["windows"][0]["label"] == "5h"
+    assert "token" not in json.dumps(body).lower()
 
 
 # ── 러너 ───────────────────────────────────────────────────────────────────

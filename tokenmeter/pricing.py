@@ -72,7 +72,10 @@ PRICES: Dict[str, Dict[str, float]] = {
                           "window": 128_000},
     "deepseek-v4-pro": {"input": 0.435, "cache_read": 0.0435, "cache_write": 0.435, "output": 0.87,
                         "window": 128_000},
-    # xAI
+    # xAI — 프롬프트가 200k 를 넘으면 요청 전체가 2배 단가로 넘어가지만, 그건 요청별
+    # 판정이라 모델 단가표로는 못 담는다. 여기 값은 표준(200k 미만) 단가다.
+    "grok-4.6-build": {"input": 2.0, "cache_read": 0.5, "cache_write": 2.0, "output": 6.0,
+                       "window": 500_000},
     "grok-4.5": {"input": 2.0, "cache_read": 0.5, "cache_write": 2.0, "output": 6.0,
                  "window": 256_000},
     # Fallback — 모르는 모델. 여기로 떨어지면 비용은 '추정' 이다 (known() 이 False)

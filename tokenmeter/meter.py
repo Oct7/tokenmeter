@@ -21,6 +21,7 @@ from .config import (
     HISTORY_DIR,
     HOURS_FILE,
     LIVE_DIR,
+    RATES_FILE,
     STATE_FILE,
     Config,
     deep_merge,
@@ -28,6 +29,7 @@ from .config import (
     load_config,
 )
 from .pricing import cache_savings, cost_usd
+from .rates import RATES_KEPT, add_rate, active_seconds, rate_slot
 
 STATE_VERSION = 2
 DAYS_KEPT = 60  # 일별 히스토리 보관 일수 (state.json 이 무한정 커지지 않게)
@@ -83,6 +85,9 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
         rec_service = rec.get("service") or (active or {}).get("service") or service
         project = rec.get("project") or (active or {}).get("project") or "(unknown)"
         model = rec.get("model") or (active or {}).get("model") or ""
+        totals = dict(rec.get("totals")) if isinstance(rec.get("totals"), dict) else {}
+        event = (active or {}).get("event") or rec.get("event") or ""
+        cwd = (active or {}).get("cwd") or rec.get("cwd") or ""
         rows.append({
             "key": key,
             "service": rec_service if isinstance(rec_service, str) else service,
@@ -92,10 +97,13 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
             "effort": rec.get("effort") or "", "vendor": rec.get("vendor") or "",
             "plan": rec.get("plan") or "unknown", "started_at": _float(
                 rec.get("started_at") or (active or {}).get("started_at")), "last_seen": token_at,
-            "totals": dict(rec.get("totals")) if isinstance(rec.get("totals"), dict) else {},
+            "totals": totals,
+            "cost_usd": _float(totals.get("cost_usd")),
             "ctx": _int(rec.get("ctx")),
             "ctx_win": _int(rec.get("ctx_win")), "sub_cost": _float(rec.get("sub_cost")),
             "attention": attention, "attention_at": signal_at, "live": active is not None,
+            "event": event if isinstance(event, str) else "",
+            "cwd": cwd if isinstance(cwd, str) else "",
         })
     return sorted(rows, key=lambda row: (ATTENTION_ORDER[row["attention"]], -_float(row["last_seen"])))
 
@@ -184,6 +192,7 @@ def _default_state() -> Dict[str, Any]:
         # 진행 중인 한 시간만 여기 둔다. 끝나면 hours.jsonl 로 나간다 — 델타마다 이
         # 파일을 통째로 다시 쓰므로 60일치를 담으면 쓰기 비용이 그만큼 불어난다.
         "hour": {"h": "", "p": {}},  # {"h": 시간키, "p": {프로젝트: [토큰, 비용, 호출]}}
+        "rate": {"h": "", "m": {}},  # {"h": 15분키, "m": {벤더/모델: [출력토큰, 활성초, 횟수]}}
         "sessions": {},  # 최근 세션 기록 (session_history 개까지)
         "updated_at": now,
     }
@@ -371,6 +380,27 @@ class Meter:
         cell[1] = round(_float(cell[1]) + cost, 10)
         cell[2] = _int(cell[2]) + 1
 
+    def _roll_rate(self, now: float) -> None:
+        """15분이 바뀌면 진행 중 속도 버킷을 rates.jsonl 로 내보낸다."""
+        now_h = rate_slot(now)
+        node = self.state.setdefault("rate", {"h": now_h, "m": {}})
+        if node.get("h") == now_h:
+            return
+        if node.get("h") and node.get("m") and not self.read_only:
+            self._append_rate(node)
+        self.state["rate"] = {"h": now_h, "m": {}}
+
+    def _append_rate(self, node: Dict[str, Any]) -> None:
+        try:
+            line = json.dumps(node, ensure_ascii=False, separators=(",", ":"))
+            with RATES_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            lines = RATES_FILE.read_text(encoding="utf-8").splitlines()
+            if len(lines) > RATES_KEPT:
+                RATES_FILE.write_text("\n".join(lines[-RATES_KEPT:]) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def ingest(self, delta: TokenDelta) -> Dict[str, Any]:
         """델타를 반영하고 저장한다. 갱신된 누적 totals 를 돌려준다."""
         now = time.time()
@@ -378,6 +408,7 @@ class Meter:
         saved = delta.saved()
         self._roll_today()
         self._roll_hour()
+        self._roll_rate(now)
         st = self.state
         self._bucket_hour(delta, cost)
 
@@ -467,6 +498,13 @@ class Meter:
             # (로그에 창 크기가 없다) 한 번 커진 창을 되돌리면 ctx% 가 튄다
             rec["ctx_win"] = max(delta.ctx_window, _int(rec.get("ctx_win")))
         rec["last_seen"] = now
+        if delta.output_tokens > 0:
+            gap = active_seconds(rec.get("out_at"), now)
+            rec["out_at"] = now
+            if gap > 0:
+                book = self.state.setdefault("rate", {"h": rate_slot(now), "m": {}})
+                add_rate(book.setdefault("m", {}), delta.vendor, delta.model,
+                         delta.output_tokens, gap)
         _accumulate(rec["totals"], delta, cost, saved)
         seen = rec.setdefault("seen", [])
         for node, tag in touched:
@@ -499,13 +537,15 @@ class Meter:
         self.state["today"] = {"date": _today_str(), "totals": _totals()}
         self.state["days"] = {}
         self.state["hour"] = {"h": _hour_str(), "p": {}}
+        self.state["rate"] = {"h": rate_slot(now), "m": {}}
         self.state["sessions"] = {}
         for group in GROUPS:
             self.state[group] = {}
-        try:
-            HOURS_FILE.unlink()
-        except OSError:
-            pass
+        for path in (HOURS_FILE, RATES_FILE):
+            try:
+                path.unlink()
+            except OSError:
+                pass
         self._save()
 
     # ── 라이브 세션 파일 (writer = 훅, reader = 데몬/CLI) ─────────────────

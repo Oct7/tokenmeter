@@ -215,12 +215,17 @@ def public_snapshot(state: Dict[str, Any], record_type: str = "snapshot") -> Dic
 MONEY_LABELS = {"api": "예상 사용액", "subscription": "API 환산 가치"}
 
 
-def receipt_data(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def receipt_data(state: Dict[str, Any], key: Optional[str] = None) -> Optional[Dict[str, Any]]:
     sessions = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
-    rows = [row for row in sessions.values() if isinstance(row, dict)]
-    if not rows:
-        return None
-    rec = max(rows, key=lambda row: _float(row.get("last_seen")))
+    if key:
+        rec = sessions.get(key)
+        if not isinstance(rec, dict):
+            return None
+    else:
+        rows = [row for row in sessions.values() if isinstance(row, dict)]
+        if not rows:
+            return None
+        rec = max(rows, key=lambda row: _float(row.get("last_seen")))
     totals = _public_totals(rec.get("totals"))
     cost = max(0.0, _float(totals.get("cost_usd")))
     window = max(0.0, _float(rec.get("ctx_win")))
@@ -727,6 +732,50 @@ def _board_table(config: Config, state: Dict[str, Any], scope: str, sync: bool) 
         right=(2, 3),
     )
     print(f"  {note}")
+
+
+def cmd_quota(args: argparse.Namespace) -> int:
+    """프로바이더 한도(잔여). 자격 증명이 있으면 네트워크로 읽는다."""
+    from .quota import chips, load, public, refresh, reset_caption
+
+    snap = load() if args.cached else refresh(force=True)
+    if args.json:
+        print(json.dumps(public(snap), ensure_ascii=False))
+        return 0
+    windows = list(snap.get("windows") or [])
+    print("TokenMeter 한도")
+    if not windows and not snap.get("errors"):
+        print("  읽을 자격 증명이 없습니다 (Claude/Codex/Grok 로그인)")
+        return 0
+    now = time.time()
+    rows = []
+    for row in windows:
+        used = row.get("used")
+        if used is not None:
+            pct = f"{float(used) * 100:.0f}%"
+        elif row.get("remaining_usd") is not None:
+            pct = f"${float(row['remaining_usd']):.2f}"
+        else:
+            pct = "-"
+        rows.append([
+            row.get("title") or row.get("source") or "-",
+            row.get("label") or "-",
+            pct,
+            reset_caption(row.get("resets_at"), now) or "-",
+            row.get("status") or "-",
+        ])
+    if rows:
+        _table(["서비스", "창", "사용", "리셋", "상태"], rows)
+    marks = chips(windows)
+    if marks:
+        print()
+        print("  " + "   ".join(text for text, _status in marks))
+    errors = snap.get("errors") or {}
+    if errors:
+        print()
+        for name, msg in errors.items():
+            print(f"  {name}: {msg}")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1265,6 +1314,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("doctor", cmd_doctor, "서비스 설정이 실제 로그를 파싱하는지 검증한다")
     p.add_argument("service", nargs="*", help="검사할 서비스 (생략하면 전부)")
+
+    p = add("quota", cmd_quota, "프로바이더 한도(잔여 5h/주간/크레딧)")
+    p.add_argument("--json", action="store_true", help="한도를 JSON으로 출력")
+    p.add_argument("--cached", action="store_true", help="네트워크 없이 캐시만 읽는다")
 
     p = add("status", cmd_status, "토큰/랭킹/라이브 세션 현황")
     p.add_argument("--scope", choices=("today", "total"), default="today", help="랭킹 기준 구간")
