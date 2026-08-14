@@ -9,14 +9,14 @@ TokenMeter is a local-first desktop meter for Claude Code, Codex, and OpenCode. 
 ```text
 ┌────────────────────────────────────────────────────┐
 │ TOKENMETER                                    TODAY │
-│ 478 output tok/s                         ≈ $15.8599 │
+│ 478 total output tok/s       API-equivalent $15.8599 │
 │ ██████████████░░░░░░░░░░░░░░░░░░░░░░░░           ▏ │
 │ in 1.2M         out 84.0k      cache 23.5M         │
 ├────────────────────────────────────────────────────┤
-│ LIVE SESSIONS                                        │
-│ api-server     opus-5      412/s      ctx 31%       │
-│ web-client     gpt-5.6      63/s      ctx 75%       │
-│ mobile         sonnet-5      3/s      ctx 95%  ⚠    │
+│ STATUS  PROJECT        MAIN/s      TOTAL    CONTEXT  │
+│ 작업    api-server       412/s      84.0k      31%  │
+│ 대기    web-client          —      21.7k      75%  │
+│ 확인    mobile              3/s       8.1k  95% · high │
 └────────────────────────────────────────────────────┘
 ```
 
@@ -83,7 +83,9 @@ tokenmeter on                     # resume measurement
 tokenmeter uninstall              # remove only TokenMeter hooks
 ```
 
-The overlay supports drag to move, wheel to resize, `S/M/L` display sizes, double-click to switch views, and right-click for all controls.
+Drag the overlay to move it and use the wheel to scroll session rows. The visible `S/M/L` buttons choose meter-only, panel, or detail layouts; `⋯` and right-click open the explicit control menu. `×` hides only the overlay, so measurement continues. To stop measurement, choose `TokenMeter 종료 · 측정 중지` from that menu or the tray.
+
+The global `tokens/s` meter is aggregate output throughput, including sub-agents. Session and model `tok/s` exclude sub-agent output and show the main model's throughput; these rates are log-delta arrival rates, not a benchmark of the provider's streaming generation speed. Session rows keep status, cumulative output, and context usage in separate columns. The optional Team tab is hidden while its endpoint is offline.
 
 ## Agent skill
 
