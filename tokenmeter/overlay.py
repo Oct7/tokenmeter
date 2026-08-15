@@ -109,7 +109,7 @@ MINI_W, MINI_H = 0.62, 30.0
 MODES = ("S", "M", "L")
 MODE_BTN = 24.0
 MIN_HIT = 28.0
-HINT = "오늘/누적 · S/M/L · ⌘K 검색 · ⋯ 메뉴"
+HINT = "오늘/누적 · S/M/L · ⋯ 메뉴"
 HINT_SEC = 20.0
 
 # 검색/명령 런처
@@ -130,23 +130,24 @@ EFFORTS = {"minimal": "min", "low": "low", "medium": "med", "high": "high",
 
 THEMES: Dict[str, Dict[str, Any]] = {
     "dark": {
-        "background_primary": "#0A0C11",
-        "background_secondary": "#11141B",
-        "surface_glass": "#171A22",
-        "surface_glass_elevated": "#20242E",
-        "surface_hover": "#FFFFFF",
-        "text_primary": "#F5F7FB",
-        "text_secondary": "#B3BAC8",
-        "text_tertiary": "#8992A5",
-        "tint": "#8CCBFF",
-        "separator": "#FFFFFF",
-        "destructive": "#FF7B88",
-        "success": "#69D58E",
-        "warning": "#F0C56D",
+        "background_primary": "#0D0E13",
+        "background_secondary": "#15161F",
+        "surface_glass": "#0D0E13",
+        "surface_glass_elevated": "#15161F",
+        "surface_hover": "#E8EAF2",
+        "text_primary": "#E8EAF2",
+        "text_secondary": "#C6CCDC",
+        "text_tertiary": "#8B93A7",
+        "tint": "#2BD9E5",
+        "separator": "#232634",
+        "destructive": "#FF5F6D",
+        "success": "#3BE06A",
+        "warning": "#FFC53D",
         "shadow": "#000000",
-        "surface_alpha": 238,
+        "surface_alpha": 236,
         "edge_alpha": 24,
-        "hover_alpha": 13,
+        "hover_alpha": 22,
+        "line_alpha": 255,
     },
     "light": {
         "background_primary": "#E7ECF2",
@@ -166,6 +167,7 @@ THEMES: Dict[str, Dict[str, Any]] = {
         "surface_alpha": 240,
         "edge_alpha": 24,
         "hover_alpha": 12,
+        "line_alpha": 24,
     },
 }
 
@@ -446,6 +448,13 @@ class MeterWindow(QWidget):
         return self.colors["destructive"]
 
     def _control_style(self) -> str:
+        if self._resolved_theme() == "dark":
+            return (
+                "QToolButton{background:transparent;border:0;border-radius:3px;}"
+                "QToolButton:hover{background:rgba(43,217,229,22);}"
+                "QToolButton:pressed{background:rgba(43,217,229,32);}"
+                "QToolButton:focus{border:1px solid #2BD9E5;background:rgba(43,217,229,18);}"
+            )
         hover = _qss_rgba(self.colors["surface_hover"], self.colors["hover_alpha"])
         pressed = _qss_rgba(self.colors["surface_hover"], self.colors["hover_alpha"] * 2)
         focus = _qss_rgba(self.colors["tint"], 18)
@@ -466,6 +475,12 @@ class MeterWindow(QWidget):
         )
 
     def _menu_style(self) -> str:
+        if self._resolved_theme() == "dark":
+            return (
+                "QMenu{background:#15161f;color:#e8eaf2;border:1px solid #2a2c3a;padding:4px;}"
+                "QMenu::item{padding:5px 18px;}QMenu::item:selected{background:#2f3350;}"
+                "QMenu::item:disabled{color:#8b93a7;}"
+            )
         selected = _qss_rgba(self.colors["tint"], 32)
         return (
             f"QMenu{{background:{self.colors['surface_glass_elevated']};"
@@ -573,8 +588,8 @@ class MeterWindow(QWidget):
         self._apply_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._font = (QFont("SF Mono") if sys.platform == "darwin" else
-                      QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self._font = QFont()
+        self._font.setStyleHint(QFont.StyleHint.Monospace)
         self._search_font = (QFont("SF Pro Text") if sys.platform == "darwin" else
                              QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
         self._search_field = QLineEdit(self)
@@ -1321,20 +1336,10 @@ class MeterWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         try:
             s = self.scale
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(0, 0, 0, 0))
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            # ponytail: 단일 alpha surface. 프로파일링으로 여유가 확인될 때만 native blur를 붙인다.
-            surface = QRectF(1.0 * s, 1.0 * s, self.width() - 2.0 * s, self.height() - 2.0 * s)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(_c(self.colors["shadow"], 34 if not self.reduce_transparency else 20))
-            p.drawRoundedRect(surface.translated(0, 1.5 * s), RADIUS_XL * s, RADIUS_XL * s)
             alpha = 255 if self.reduce_transparency else int(self.colors["surface_alpha"])
-            p.setBrush(_c(self.colors["surface_glass"], alpha))
-            p.drawRoundedRect(surface, RADIUS_XL * s, RADIUS_XL * s)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(_c(self.colors["separator"], int(self.colors["edge_alpha"])))
-            p.drawRoundedRect(surface, RADIUS_XL * s, RADIUS_XL * s)
+            p.fillRect(QRectF(0, 0, self.width(), self.height()),
+                       _c(self.colors["surface_glass"], alpha))
+            p.fillRect(QRectF(0, 0, self.width(), 1.0 * s), _c("#FFFFFF", 22))
             self._hit = {}
             if self.palette_open:
                 y = self._draw_header(PAD * s, PAD * s, self.width() - PAD * 2 * s)
@@ -1477,7 +1482,7 @@ class MeterWindow(QWidget):
         money = cost_caption(self._approx(), tot.get("cost_usd"))
         if counts["check"]:
             side = min(150 * s, w * 0.46)
-            p.fillRect(QRectF(x, y, 72 * s, 24 * s), _c(self.colors["destructive"], 28))
+            p.fillRect(QRectF(x, y, 72 * s, 24 * s), _c(self.colors["destructive"], 30))
             self._f(12, True)
             self._text(x + 6 * s, y, 68 * s, 24 * s, f"확인 {counts['check']}",
                        self.colors["destructive"])
@@ -1500,7 +1505,7 @@ class MeterWindow(QWidget):
             self._text(x + rate_w, y, w - rate_w, 26 * s, "전체 출력 tok/s",
                        self.colors["text_tertiary"])
             self._f(10, True)
-            self._text(x, y, w, 26 * s, money, self.colors["text_secondary"], right=True)
+            self._text(x, y, w, 26 * s, money, self.colors["text_tertiary"], right=True)
 
         # 세그먼트 게이지가 TokenMeter의 고유한 glanceable identity다.
         y = y0 + 55 * s
@@ -1508,9 +1513,9 @@ class MeterWindow(QWidget):
         for i in range(SEGMENTS):
             position = i / (SEGMENTS - 1.0)
             on = i < lit
-            color = _c(self._seg_color(position), 255 if on else 24)
+            color = _c(self._seg_color(position), 255 if on else 26)
             if on and i >= lit - 1.0:
-                color = _c(self.colors["text_primary"], int(120 + 135 * self.pulse))
+                color = _c("#FFFFFF", int(120 + 135 * self.pulse))
             p.fillRect(QRectF(x + i * gw, y, gw - 1.6 * s, bar_h), color)
         if self.peak > 0.01:
             px = x + _clamp(self.peak, 0.0, 1.0) * w - 1.5 * s
@@ -1558,7 +1563,7 @@ class MeterWindow(QWidget):
             selected = name == current
             p.fillRect(QRectF(bx, y, bw - 2 * s, h),
                        _c(self.colors["tint"] if selected else self.colors["surface_hover"],
-                          28 if selected else 10))
+                          30 if selected else 12))
             self._text(bx + 4.5 * s, y, bw, h, name,
                        self.colors["tint"] if selected else self.colors["text_tertiary"])
             self._hit[f"mode:{name}"] = (bx, y, bw, h)
@@ -1603,9 +1608,9 @@ class MeterWindow(QWidget):
         bar_h, by, lit = 6 * s, y + (h - 6 * s) / 2.0, self.gauge * segments
         for i in range(segments):
             on = i < lit
-            color = _c(self._seg_color(i / (segments - 1.0)), 255 if on else 24)
+            color = _c(self._seg_color(i / (segments - 1.0)), 255 if on else 26)
             if on and i >= lit - 1.0:
-                color = _c(self.colors["text_primary"], int(120 + 135 * self.pulse))
+                color = _c("#FFFFFF", int(120 + 135 * self.pulse))
             p.fillRect(QRectF(gx + i * gw / segments, by,
                               gw / segments - 1.6 * s, bar_h), color)
 
@@ -1615,7 +1620,7 @@ class MeterWindow(QWidget):
             return y
         s, p = self.scale, self._painter
         h = (CARD_H - 6) * s
-        p.fillRect(QRectF(x, y, w, h), _c(self.colors["warning"], 24))
+        p.fillRect(QRectF(x, y, w, h), _c(self.colors["warning"], 28))
         self._f(8, True)
         self._text(x + 6 * s, y, w - 12 * s, h, self.card[1], self.colors["warning"])
         self._hit["card"] = (x, y, w, h)
@@ -1632,7 +1637,8 @@ class MeterWindow(QWidget):
 
     def _draw_graph(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
-        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(self.colors["separator"], 22))
+        p.fillRect(QRectF(x, y - 4 * s, w, 1.0),
+                   _c(self.colors["separator"], int(self.colors["line_alpha"])))
         y += GRAPH_TOP * s
         if self.panel == "rates":
             return self._draw_rate_graph(x, y, w)
@@ -1667,7 +1673,7 @@ class MeterWindow(QWidget):
             bx = x + i * bw
             if bar.total <= 0:  # 빈 칸도 바닥선을 남겨야 축이 이어져 보인다
                 p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s),
-                           _c(self.colors["separator"], 22))
+                           _c(self.colors["separator"], int(self.colors["line_alpha"])))
                 continue
             part = bh * (bar.total / data.peak)
             cy = y + bh - part
@@ -1709,7 +1715,7 @@ class MeterWindow(QWidget):
             bx = x + i * bw
             if bar.rate <= 0:
                 p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s),
-                           _c(self.colors["separator"], 22))
+                           _c(self.colors["separator"], int(self.colors["line_alpha"])))
                 continue
             part = bh * (bar.rate / data.peak)
             p.fillRect(QRectF(bx, y + bh - part, bw - GRAPH_GAP * s, part),
@@ -1758,7 +1764,8 @@ class MeterWindow(QWidget):
     def _draw_rows(self, x: float, y: float, w: float) -> float:
         """세션·한도·속도·일별·팀을 보이는 탭으로 직접 전환한다."""
         s, p = self.scale, self._painter
-        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(self.colors["separator"], 22))
+        p.fillRect(QRectF(x, y - 4 * s, w, 1.0),
+                   _c(self.colors["separator"], int(self.colors["line_alpha"])))
         panels = self._visible_panels()
         tab_w = w / max(1, len(panels))
         self._f(7.5, True)
@@ -1834,12 +1841,12 @@ class MeterWindow(QWidget):
             self._draw_rate_spans(x + w - RATE_BTN_W * 4 * s, y)
             y += BTN_H * s + 2 * s
         self._f(6.5, True)
-        self._text(x, y, w * 0.34, COLHEAD_H * s, "프로바이더", self.colors["text_tertiary"], alpha=145)
-        self._text(x + w * 0.34, y, w * 0.30, COLHEAD_H * s, "메인 모델", self.colors["text_tertiary"], alpha=145)
+        self._text(x, y, w * 0.34, COLHEAD_H * s, "프로바이더", self.colors["text_tertiary"], alpha=125)
+        self._text(x + w * 0.34, y, w * 0.30, COLHEAD_H * s, "메인 모델", self.colors["text_tertiary"], alpha=125)
         self._text(x + w * 0.64, y, w * 0.18 - 4 * s, COLHEAD_H * s,
-                   "누적", self.colors["text_tertiary"], right=True, alpha=145)
+                   "누적", self.colors["text_tertiary"], right=True, alpha=125)
         self._text(x + w * 0.82, y, w * 0.18 - 6 * s, COLHEAD_H * s,
-                   "tok/s", self.colors["text_tertiary"], right=True, alpha=145)
+                   "tok/s", self.colors["text_tertiary"], right=True, alpha=125)
         y += COLHEAD_H * s
         top = max([row[3] for row in rows] or [0.0]) or 1.0
         for i, (vendor, model, tokens, rate, share) in enumerate(rows):
@@ -1865,12 +1872,12 @@ class MeterWindow(QWidget):
     def _draw_quota_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
         s, p = self.scale, self._painter
         self._f(6.5, True)
-        self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", self.colors["text_tertiary"], alpha=145)
-        self._text(x + w * 0.30, y, w * 0.22, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=145)
+        self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", self.colors["text_tertiary"], alpha=125)
+        self._text(x + w * 0.30, y, w * 0.22, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=125)
         self._text(x + w * 0.52, y, w * 0.22 - 4 * s, COLHEAD_H * s,
-                   "사용량", self.colors["text_tertiary"], right=True, alpha=145)
+                   "사용량", self.colors["text_tertiary"], right=True, alpha=125)
         self._text(x + w * 0.74, y, w * 0.26 - 6 * s, COLHEAD_H * s,
-                   "다음 리셋", self.colors["text_tertiary"], right=True, alpha=145)
+                   "다음 리셋", self.colors["text_tertiary"], right=True, alpha=125)
         y += COLHEAD_H * s
         for i, (title, label, used, reset, status) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
@@ -1925,10 +1932,7 @@ class MeterWindow(QWidget):
             return y
         s, p = self.scale, self._painter
         h = (DETAIL_H - 4) * s
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(_c(self.colors["surface_glass_elevated"],
-                      255 if self.reduce_transparency else 220))
-        p.drawRoundedRect(QRectF(x, y, w, h), RADIUS_MD * s, RADIUS_MD * s)
+        p.fillRect(QRectF(x, y, w, h), _c(self.colors["text_primary"], 12))
         why = check_reason(rec.get("event"))
         waited = wait_caption(time.time(), rec.get("attention_at") or rec.get("last_seen"))
         bits = [part for part in (
@@ -1939,15 +1943,15 @@ class MeterWindow(QWidget):
             f"서브 {sub_ratio(rec) * 100:.0f}%" if sub_ratio(rec) > 0 else "",
         ) if part]
         self._f(7.5, True)
-        self._text(x + 10 * s, y + 2 * s, w - 20 * s, h * 0.5,
+        self._text(x + 6 * s, y, w - 12 * s, h * 0.5,
                    " · ".join(bits) or "세션 상세")
         self._f(7, True)
         bw = 56 * s
-        self._text(x + 10 * s, y + h * 0.5, bw, h * 0.5, "영수증 복사", self.colors["tint"])
-        self._hit["act:copy"] = (x + 8 * s, y + h * 0.5, bw + 8 * s, h * 0.5)
-        self._text(x + 20 * s + bw, y + h * 0.5, 88 * s, h * 0.5,
-                   "프로젝트 사용량", self.colors["tint"])
-        self._hit["act:project"] = (x + 16 * s + bw, y + h * 0.5, 96 * s, h * 0.5)
+        self._text(x + 6 * s, y + h * 0.5, bw, h * 0.5, "영수증", self.colors["tint"])
+        self._hit["act:copy"] = (x + 6 * s, y + h * 0.5, bw, h * 0.5)
+        self._text(x + 8 * s + bw, y + h * 0.5, 70 * s, h * 0.5,
+                   "이 프로젝트", self.colors["tint"])
+        self._hit["act:project"] = (x + 8 * s + bw, y + h * 0.5, 70 * s, h * 0.5)
         return y + DETAIL_H * s
 
     def _draw_session_head(self, x: float, y: float, w: float) -> float:
@@ -1960,7 +1964,7 @@ class MeterWindow(QWidget):
         ):
             self._text(x + start * w + CELL_PAD * s, y,
                        (end - start) * w - CELL_PAD * s, COLHEAD_H * s, name,
-                       self.colors["text_tertiary"], right=right, alpha=145)
+                       self.colors["text_tertiary"], right=right, alpha=125)
         return y + COLHEAD_H * s
 
     def _draw_session_rows(self, x: float, y: float, w: float, rows: List[SessionRow]) -> None:

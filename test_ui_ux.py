@@ -203,6 +203,23 @@ def test_tokenmeter_controls_are_visible_before_optional_search(_tmp: Path) -> N
         assert window.isVisible() and not window.palette_open
 
 
+def test_classic_meter_visual_tokens_and_square_surface(_tmp: Path) -> None:
+    """v0.3 계기판의 고대비 색과 평평한 사각 표면을 기본 디자인으로 고정한다."""
+    dark = overlay.THEMES["dark"]
+    assert dark["surface_glass"] == "#0D0E13"
+    assert dark["text_primary"] == "#E8EAF2"
+    assert dark["tint"] == "#2BD9E5"
+    assert (dark["success"], dark["warning"], dark["destructive"]) == (
+        "#3BE06A", "#FFC53D", "#FF5F6D",
+    )
+    assert overlay.HINT == "오늘/누적 · S/M/L · ⋯ 메뉴"
+
+    with _window() as window:
+        image = window.grab().toImage()
+        corner = image.pixelColor(image.width() - 1, image.height() - 1)
+        assert (corner.red(), corner.green(), corner.blue(), corner.alpha()) == (13, 14, 19, 236)
+
+
 def test_command_launcher_fuzzy_search_opens_session(_tmp: Path) -> None:
     with _window() as window:
         window.status = _sessions()
