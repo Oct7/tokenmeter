@@ -78,6 +78,7 @@ tokenmeter quota                  # remaining Claude/Codex/Grok plan windows
 tokenmeter services               # detected logs and hook state
 tokenmeter doctor                 # validate parsers and installation
 tokenmeter meter off              # hide overlay; keep measuring
+tokenmeter update on              # opt in to daily stable-release updates
 tokenmeter off                    # stop measuring; keep hooks
 tokenmeter on                     # resume measurement
 tokenmeter uninstall              # remove only TokenMeter hooks
@@ -107,6 +108,17 @@ It provides `/tm`, `/tm-meter`, `/tm-measure`, and `/tm-doctor`.
 - The optional self-hosted leaderboard is disabled by default. Team sync reuses that endpoint; its only added live-session data is aggregate attention counts under `today`. TokenMeter does not host the service.
 
 ## Update or remove
+
+Automatic updates are off by default. Opt in to check once per day when the daemon starts, or update immediately:
+
+```bash
+tokenmeter update on
+tokenmeter update now
+```
+
+Only stable GitHub Releases are installed. Turn it back off with `tokenmeter update off`.
+
+Manual update:
 
 ```bash
 uv tool install --force git+https://github.com/Oct7/tokenmeter.git

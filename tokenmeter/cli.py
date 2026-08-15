@@ -633,6 +633,24 @@ def cmd_meter(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """선택형 자동 업데이트 설정 또는 즉시 업데이트."""
+    data = load_toggle()
+    if args.state is None:
+        print(f"  자동 업데이트: {'켜짐' if data.get('auto_update') is True else '꺼짐'}")
+        return 0
+    if args.state in ("on", "off"):
+        data["auto_update"] = args.state == "on"
+        save_toggle(data)
+        print(f"  자동 업데이트를 {'켰습니다' if args.state == 'on' else '껐습니다'}.")
+        if args.state == "on":
+            print("  데몬 시작 시 하루 한 번 GitHub 정식 릴리스를 확인합니다.")
+        return 0
+    updated, message = installer.update_package(force=True)
+    print("  " + message)
+    return 0 if updated is not None else 1
+
+
 def cmd_uninstall(args: argparse.Namespace) -> int:
     """우리 훅 엔트리만 제거한다."""
     config = load_config()
@@ -1219,6 +1237,18 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print("[TokenMeter] 측정이 꺼져 있어(`tokenmeter off`) 데몬을 띄우지 않습니다.")
         return 0
 
+    updated, message = installer.update_package()
+    if message:
+        print(f"[TokenMeter] {message}")
+    if updated:
+        argv = [sys.executable, "-m", "tokenmeter.cli", "daemon"]
+        if args.no_overlay:
+            argv.append("--no-overlay")
+        try:
+            os.execv(sys.executable, argv)
+        except OSError as exc:
+            print(f"[TokenMeter] 새 버전 재실행 실패, 현재 프로세스로 계속합니다: {exc}")
+
     ensure_dirs()
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     # 훅의 기동 락(data/daemon.lock)은 성공 경로에서 아무도 지우지 않는다.
@@ -1309,6 +1339,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("meter", cmd_meter, "세션 시작 시 미터 창을 띄울지 (인자 없으면 현재 값)")
     p.add_argument("state", nargs="?", choices=["on", "off"], help="on | off")
+
+    p = add("update", cmd_update, "정식 릴리스 자동 업데이트 설정 / 즉시 업데이트")
+    p.add_argument("state", nargs="?", choices=["on", "off", "now"], help="on | off | now")
 
     add("services", cmd_services, "서비스별 활성/로그/훅 현황")
 

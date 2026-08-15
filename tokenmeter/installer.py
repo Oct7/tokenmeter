@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .config import ROOT, Config, ServiceSpec
+from . import __version__
+from .config import ROOT, Config, ServiceSpec, load_toggle, save_toggle
 
 HOOK_SCRIPT = Path(__file__).resolve().parent / "hook.py"  # 항상 나와 같은 디렉토리
 MARKER = f'"{HOOK_SCRIPT}"'  # 우리 엔트리 식별자 (부분 경로가 아니라 절대 경로 전체)
@@ -35,6 +40,10 @@ PLUGIN_MARKER = "tokenmeter:generated"  # 우리가 만든 플러그인 파일�
 LEGACY_PLUGIN_MARKER = "tokenpet:generated"
 BACKUP_SUFFIX = ".bak-tokenmeter"
 HOOK_TIMEOUT = 5
+UPDATE_INTERVAL = 86400
+RELEASE_URL = "https://api.github.com/repos/Oct7/tokenmeter/releases/latest"
+REPOSITORY = "git+https://github.com/Oct7/tokenmeter.git"
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 # OpenCode 1.18.x 플러그인 (ESM, named export 하는 async 팩토리).
 # __PY__ / __HOOK__ / __SERVICE__ 는 설치 시점의 절대 경로로 치환된다.
@@ -279,6 +288,89 @@ def _apply_opencode_plugin(spec: ServiceSpec, remove: bool, dry_run: bool) -> st
     except OSError as exc:
         return f"{spec.label}: {path} 에 쓸 수 없어 건너뜁니다 ({exc}) — 파일은 그대로 둡니다"
     return f"{spec.label}: 설치 완료 → {path}"
+
+
+# ── 패키지 자동 업데이트 ────────────────────────────────────────────────────
+
+
+def _version(value: str) -> Optional[Tuple[int, int, int]]:
+    match = _VERSION.fullmatch(value.strip())
+    return tuple(map(int, match.groups())) if match else None
+
+
+def _latest_release() -> Tuple[str, Tuple[int, int, int]]:
+    request = urllib.request.Request(
+        RELEASE_URL,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": f"TokenMeter/{__version__}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        data = json.loads(response.read(65536))
+    tag = str(data.get("tag_name") or "") if isinstance(data, dict) else ""
+    parsed = _version(tag)
+    if parsed is None:
+        raise ValueError(f"지원하지 않는 릴리스 태그: {tag or '(없음)'}")
+    return ".".join(map(str, parsed)), parsed
+
+
+def _update_command(version: str) -> Optional[List[str]]:
+    """현재 가상환경을 만든 도구로 해당 정식 릴리스만 설치한다."""
+    prefix = Path(sys.prefix).resolve()
+    spec = f"{REPOSITORY}@v{version}"
+    pipx = shutil.which("pipx")
+    if pipx and (prefix / "pipx_metadata.json").exists():
+        return [pipx, "install", "--force", spec]
+
+    uv = shutil.which("uv")
+    if not uv:
+        return None
+    try:
+        found = subprocess.run(
+            [uv, "tool", "dir"], capture_output=True, text=True, timeout=5, check=False,
+        )
+        tool_dir = Path(found.stdout.strip()).resolve()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if found.returncode == 0 and (prefix == tool_dir or tool_dir in prefix.parents):
+        return [uv, "tool", "install", "--force", spec]
+    return None
+
+
+def update_package(force: bool = False, now: Optional[float] = None) -> Tuple[Optional[bool], str]:
+    """새 정식 릴리스를 설치한다. True=갱신, False=변경 없음, None=실패."""
+    toggle = load_toggle()
+    if not force and toggle.get("auto_update") is not True:
+        return False, ""
+    now = time.time() if now is None else now
+    try:
+        checked = float(toggle.get("update_checked_at") or 0)
+    except (TypeError, ValueError):
+        checked = 0
+    if not force and 0 <= now - checked < UPDATE_INTERVAL:
+        return False, ""
+
+    # 실패해도 매 세션마다 GitHub를 두드리지 않도록 시도 시각을 먼저 기록한다.
+    toggle["update_checked_at"] = now
+    save_toggle(toggle)
+    try:
+        latest, latest_tuple = _latest_release()
+    except (OSError, ValueError) as exc:
+        return None, f"업데이트 확인 실패: {exc}"
+    current = _version(__version__)
+    if current is None:
+        return None, f"현재 버전을 판독할 수 없습니다: {__version__}"
+    if latest_tuple <= current:
+        return False, f"최신 버전입니다 (v{__version__})" if force else ""
+
+    command = _update_command(latest)
+    if command is None:
+        return None, "uv tool 또는 pipx 설치본에서만 자동 업데이트할 수 있습니다"
+    try:
+        result = subprocess.run(command, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"v{latest} 업데이트 실패: {exc}"
+    if result.returncode != 0:
+        return None, f"v{latest} 업데이트 실패 (exit {result.returncode})"
+    return True, f"v{__version__} → v{latest} 업데이트 완료"
 
 
 # ── 공개 API ────────────────────────────────────────────────────────────────

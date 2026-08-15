@@ -2621,6 +2621,51 @@ def test_quota_cli_prints_windows(tmp: Path) -> None:
     assert "token" not in json.dumps(body).lower()
 
 
+def test_auto_update_is_opt_in_and_throttled(tmp: Path) -> None:
+    """명시적으로 켠 설치본만 정식 릴리스를 받고, 하루 동안 재확인하지 않는다."""
+    from tokenmeter import cli, config as config_mod
+
+    toggle_file = tmp / "toggle.json"
+    saved_file = config_mod.TOGGLE_FILE
+    saved_latest = installer._latest_release
+    saved_command = installer._update_command
+    saved_run = installer.subprocess.run
+    calls: List[List[str]] = []
+    try:
+        config_mod.TOGGLE_FILE = toggle_file
+        assert installer._version("v1.2.3") == (1, 2, 3)
+        assert installer._version("1.2") is None
+        assert installer.update_package(now=200_000) == (False, "")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cli.main(["update", "on"]) == 0
+        assert config_mod.load_toggle()["auto_update"] is True
+
+        installer._latest_release = lambda: ("99.0.0", (99, 0, 0))
+        installer._update_command = lambda version: ["updater", version]
+
+        def fake_run(command: List[str], **_kwargs: Any) -> argparse.Namespace:
+            calls.append(command)
+            return argparse.Namespace(returncode=0)
+
+        installer.subprocess.run = fake_run
+        updated, message = installer.update_package(now=200_000)
+        assert updated is True and "v99.0.0" in message
+        assert calls == [["updater", "99.0.0"]]
+        assert config_mod.load_toggle()["update_checked_at"] == 200_000
+
+        assert installer.update_package(now=200_001) == (False, "")
+        assert calls == [["updater", "99.0.0"]]
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert cli.main(["update", "off"]) == 0
+        assert config_mod.load_toggle()["auto_update"] is False
+    finally:
+        config_mod.TOGGLE_FILE = saved_file
+        installer._latest_release = saved_latest
+        installer._update_command = saved_command
+        installer.subprocess.run = saved_run
+
+
 # ── 러너 ───────────────────────────────────────────────────────────────────
 
 

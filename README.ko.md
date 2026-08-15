@@ -78,6 +78,7 @@ tokenmeter quota                  # Claude/Codex/Grok 잔여 한도
 tokenmeter services               # 로그 감지와 훅 상태
 tokenmeter doctor                 # 파서와 설치 검증
 tokenmeter meter off              # 창만 숨기고 측정은 유지
+tokenmeter update on              # 하루 한 번 정식 릴리스 자동 업데이트
 tokenmeter off                    # 측정을 멈추고 훅은 유지
 tokenmeter on                     # 측정 재개
 tokenmeter uninstall              # TokenMeter 훅만 제거
@@ -107,6 +108,17 @@ npx skills add Oct7/tokenmeter -g -a claude-code
 - 선택형 자체 호스팅 랭킹은 기본적으로 꺼져 있습니다. 팀 동기화는 기존 endpoint를 재사용하며, 새 라이브 세션 정보로는 `today` 안의 관심 상태 집계만 추가합니다. TokenMeter는 호스팅 서비스를 제공하지 않습니다.
 
 ## 업데이트와 제거
+
+자동 업데이트는 기본적으로 꺼져 있습니다. 데몬 시작 시 하루 한 번 확인하도록 켜거나 지금 바로 업데이트할 수 있습니다.
+
+```bash
+tokenmeter update on
+tokenmeter update now
+```
+
+GitHub의 정식 릴리스만 설치합니다. 다시 끄려면 `tokenmeter update off`를 실행합니다.
+
+수동 업데이트:
 
 ```bash
 uv tool install --force git+https://github.com/Oct7/tokenmeter.git
