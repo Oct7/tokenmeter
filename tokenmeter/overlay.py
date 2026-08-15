@@ -6,7 +6,7 @@
   · 위쪽은 **미터기** — 세그먼트 게이지는 로그에서 관측한 **전체 출력 처리량**(tok/s)이다.
     유입이 끊기면 지수감쇠로 내려가 0 에서 멈춘다. 곁눈질만으로 에이전트가
     일하는 중인지 알 수 있다는 점이 이 도구의 존재 이유다.
-  · 아래쪽은 **보이는 패널** — 세션 / 한도 / 속도 / 일별 / 팀을 탭으로 바로 고른다.
+  · 아래쪽은 **보이는 패널** — 세션 / 프로젝트 / 한도 / 속도 / 일별 / 팀을 탭으로 바로 고른다.
   · ⌘K/Ctrl+K 검색은 세션과 명령을 빠르게 실행하는 선택형 보조 경로다.
   · 확인이 있으면 속도보다 확인 세션을 먼저 보여준다.
   · 입력/출력/캐시는 이름과 절제된 의미색을 함께 써 색에만 의존하지 않는다.
@@ -61,7 +61,7 @@ MOTION_FAST_MS, MOTION_NORMAL_MS = 120, 180
 BASE_W = 340
 HEADER_H = 28
 SEARCH_H = 38
-METER_H = 104               # 상단 조작부를 포함한 TokenMeter 계기판
+METER_H = 128               # 상단 조작부를 포함한 택시 미터형 TokenMeter 계기판
 ROW_H = 28
 FOOT_H = 22
 PAD = 12
@@ -77,16 +77,20 @@ SEGMENTS = 28
 PREFS_NAME = "overlay.json"
 
 # TokenMeter의 주 탐색은 보이는 패널 탭이다. 검색은 키보드 보조 경로로만 둔다.
-PANELS = ("sessions", "quota", "rates", "days", "board")  # 첫 항목이 기본 패널
-PANEL_TITLES = {"board": "팀", "days": "일별", "sessions": "세션", "rates": "속도", "quota": "한도"}
-PANEL_ROWS = {"board": 5, "days": 7, "sessions": 10, "rates": 6, "quota": 8}
+PANELS = ("sessions", "projects", "quota", "rates", "days", "board")  # 첫 항목이 기본 패널
+PANEL_TITLES = {
+    "board": "팀", "days": "일별", "sessions": "세션", "projects": "프로젝트",
+    "rates": "속도", "quota": "한도",
+}
+PANEL_ROWS = {"board": 5, "days": 7, "sessions": 10, "projects": 7, "rates": 6, "quota": 8}
 CHIP_H = 18                 # 한도 칩 한 줄 (자격 있을 때만 높이에 더한다)
 MARK_W = {"board": 16.0, "days": 36.0}  # 등수(1자) vs 날짜(5자)
 Row = Tuple[str, str, int, float, bool]  # (좌측 표식, 이름, 토큰, 비용, 강조)
+ProjectRow = Tuple[str, int, float]      # (프로젝트, 측정 토큰, 마지막 활동)
 # 세션 줄 — (키, 상태, 프로젝트, 모델, effort, tok/s, 벤더, 라이브, 시각,
 #              누적토큰, ctx점유율, 창크기앎, 서브몫)
 SessionRow = Tuple[str, str, str, str, str, float, str, bool, str, int, float, bool, float]
-WHEEL_LINE = 60.0           # 세션 목록 한 줄을 넘기는 휠 델타 (한 칸=120 → 두 줄)
+WHEEL_LINE = 60.0           # 목록 한 줄을 넘기는 휠 델타 (한 칸=120 → 두 줄)
 # 세션 표 칸 — 상태/프로젝트/속도/누적/컨텍스트는 항상 같은 위치에 둔다.
 SESSION_COLS = ((0.00, 0.16, False, 8.0), (0.16, 0.52, False, 9.0),
                 (0.52, 0.68, True, 8.5), (0.68, 0.84, True, 8.0),
@@ -105,6 +109,7 @@ CTX_WARN, CTX_HOT = 0.70, 0.90  # 컨텍스트 점유 경고선 (앰버 / 빨강
 
 # 미니 모드 — 게이지 한 줄만. 회의·녹화 중 화면을 비우려고 쓴다
 MINI_W, MINI_H = 0.62, 30.0
+MINI_RATE_W = 60.0
 # 화면에 보이는 직접 조작 — S(미터) · M(패널) · L(상세)
 MODES = ("S", "M", "L")
 MODE_BTN = 24.0
@@ -257,6 +262,19 @@ def short_effort(value: Any) -> str:
 
 def _rate(v: float) -> str:
     return f"{_fmt(v)}/s" if v >= 0.5 else ""  # 0 을 늘어놓으면 눈이 갈 곳을 잃는다
+
+
+def mini_rate_caption(value: Any) -> str:
+    """미니 미터의 고정 폭 안에 들어오는 최대 6자 tok/s 문구."""
+    scaled, unit = max(0.0, _float(value)), ""
+    for suffix in ("k", "M", "G", "T", "P"):
+        if scaled < 999.5:
+            break
+        scaled, unit = scaled / 1000.0, suffix
+    if scaled >= 999.5:
+        return "MAX/s"
+    decimals = 1 if scaled < (9.95 if unit else 99.95) else 0
+    return f"{scaled:.{decimals}f}{unit}/s"
 
 
 def ctx_ratio(rec: Any) -> float:
@@ -554,6 +572,11 @@ class MeterWindow(QWidget):
         self.session_filter = (
             prefs.get("filter") if prefs.get("filter") in SESSION_FILTERS else "live"
         )
+        raw_representatives = prefs.get("quota_representatives")
+        self.quota_representatives = {
+            str(source): str(key) for source, key in raw_representatives.items()
+            if source and key
+        } if isinstance(raw_representatives, dict) else {}
         self.end_card = bool(prefs.get("end_card", True))
         self.mini = bool(prefs.get("mini", False))
         # 힌트는 딱 한 번 — 본 적이 없을 때만 잠깐 띄우고 그 사실을 prefs 에 남긴다
@@ -676,7 +699,7 @@ class MeterWindow(QWidget):
             extra = FILTER_H + COLHEAD_H
         elif self.panel == "rates":
             extra = COLHEAD_H + (0 if self.expanded else BTN_H)
-        elif self.panel == "quota":
+        elif self.panel in ("quota", "projects"):
             extra = COLHEAD_H
         else:
             extra = 0
@@ -739,6 +762,7 @@ class MeterWindow(QWidget):
                 "span": self.span,
                 "rate_span": self.rate_span,
                 "filter": self.session_filter,
+                "quota_representatives": self.quota_representatives,
                 "end_card": self.end_card,
                 "mini": self.mini,
                 "hint_seen": self.hint_seen,
@@ -830,7 +854,9 @@ class MeterWindow(QWidget):
     def _quota_marks(self) -> List[Tuple[str, str]]:
         from .quota import chips
 
-        return chips(list((self.quota or {}).get("windows") or []))
+        return chips(
+            list((self.quota or {}).get("windows") or []), self.quota_representatives,
+        )
 
     def _chip_h(self) -> float:
         return CHIP_H if self._quota_marks() else 0.0
@@ -879,13 +905,6 @@ class MeterWindow(QWidget):
         except Exception:
             return {"check": 0, "working": 0, "waiting": 0, "risk": 0}
 
-    def _check_project(self) -> str:
-        projects = {
-            project_label(rec.get("project"), rec.get("cwd"))
-            for rec in session_views(self.status) if rec.get("attention") == "check"
-        }
-        return next(iter(projects)) if len(projects) == 1 else ""
-
     # ── 아래 패널 (관심현황 / 일별 히스토리 / 최근 세션 / 속도) ──────────
     def _rebuild_rows(self) -> None:
         try:
@@ -899,6 +918,8 @@ class MeterWindow(QWidget):
             return self._day_rows()
         if self.panel == "sessions":
             return self._session_rows()
+        if self.panel == "projects":
+            return self._project_rows()
         if self.panel == "rates":
             return self._rate_rows()
         if self.panel == "quota":
@@ -909,6 +930,27 @@ class MeterWindow(QWidget):
         counts = self._counts()
         head = f"확인 {counts['check']} · 작업 {counts['working']} · 대기 {counts['waiting']}"
         return rows, f"{head} · {note}"
+
+    def _project_rows(self) -> Tuple[List[ProjectRow], str]:
+        """실제로 측정된 프로젝트 토큰만, 마지막 세션 활동이 최신인 순서로."""
+        book = self.status.get("projects")
+        projects = book if isinstance(book, dict) else {}
+        rows: List[ProjectRow] = []
+        for name, node in projects.items():
+            if not isinstance(node, dict):
+                continue
+            measured = _tokens_of(node.get("totals"))
+            if measured > 0:
+                rows.append((str(name), measured, _float(node.get("last_seen"))))
+        rows.sort(key=lambda row: (-row[2], row[0]))
+        total = sum(row[1] for row in rows)
+        if not rows:
+            return [], "측정된 프로젝트 토큰 없음"
+        cap = self._cap("projects")
+        self.scroll = max(0, min(self.scroll, len(rows) - cap))
+        visible = rows[self.scroll:self.scroll + cap]
+        more = f" · {self.scroll + len(visible)}/{len(rows)}" if len(rows) > cap else ""
+        return visible, f"프로젝트 {len(rows)}개 · 누적 측정 {_fmt(total)} 토큰{more}"
 
     def _day_rows(self) -> Tuple[List[Row], str]:
         """날짜별 토큰·비용, 최근 날짜부터. 진행 중인 오늘도 같은 표에 놓는다."""
@@ -955,8 +997,8 @@ class MeterWindow(QWidget):
             ))
         if not rows:
             empty = {
-                "check": "확인이 필요한 세션 없음",
-                "live": "라이브 세션 없음",
+                "live": "LIVE 세션 없음",
+                "archive": "ARCHIVE 세션 없음",
             }.get(self.session_filter, "기록된 세션 없음")
             return [], empty
         more = f" · {self.scroll + len(rows)}/{len(views)}" if len(views) > cap else ""
@@ -976,7 +1018,7 @@ class MeterWindow(QWidget):
         warn = sum(1 for row in snap.get("windows") or [] if row.get("status") in ("warn", "exhausted"))
         age = _age_caption(snap.get("updated_at"))
         errors = snap.get("errors") or {}
-        note = f"한도 {len(rows)}개 · {age}"
+        note = f"한도 {len(rows)}개 · {age} · 행 클릭=대표"
         if warn:
             note += f" · 경고 {warn}"
         if errors:
@@ -998,6 +1040,7 @@ class MeterWindow(QWidget):
     def _palette_catalog(self) -> List[Dict[str, Any]]:
         panel_copy = {
             "sessions": ("세션", "현재 에이전트 상태와 컨텍스트"),
+            "projects": ("프로젝트", "측정 토큰 · 최근 세션 순"),
             "rates": ("속도", "모델별 출력 처리량"),
             "days": ("사용량 히스토리", "오늘 · 7일 · 30일"),
             "quota": ("플랜 한도", "Claude · Codex · Grok"),
@@ -1012,12 +1055,12 @@ class MeterWindow(QWidget):
                 "keywords": f"{panel} {PANEL_TITLES[panel]}",
             })
         items.extend([
-            {"target": "filter:check", "title": "확인 필요한 세션", "subtitle": "응답을 기다리는 작업만",
-             "tag": "필터", "order": 12, "keywords": "attention check 확인"},
-            {"target": "filter:live", "title": "라이브 세션", "subtitle": "확인 · 작업 · 대기",
+            {"target": "filter:live", "title": "LIVE 세션", "subtitle": "현재 또는 1시간 이내 활동",
              "tag": "필터", "order": 13, "keywords": "active live 라이브"},
+            {"target": "filter:archive", "title": "ARCHIVE 세션", "subtitle": "마지막 활동 후 1시간 이상",
+             "tag": "필터", "order": 14, "keywords": "archive history 보관"},
             {"target": "filter:all", "title": "모든 세션", "subtitle": "종료된 기록 포함",
-             "tag": "필터", "order": 14, "keywords": "all history 전체"},
+             "tag": "필터", "order": 15, "keywords": "all history 전체"},
             {"target": "mode:S", "title": "미터만 보기", "subtitle": "콘텐츠 목록 접기",
              "tag": "보기", "order": 40, "keywords": "small compact s"},
             {"target": "mode:M", "title": "기본 보기", "subtitle": "미터와 핵심 목록",
@@ -1181,7 +1224,7 @@ class MeterWindow(QWidget):
         labels = {
             "search": "세션 또는 명령 검색 · Command K",
             "scope": "오늘과 누적 전환",
-            "attention": "확인이 필요한 세션 보기",
+            "attention": "확인 세션을 맨 위로 전체 세션 보기",
             "menu": "더 보기 메뉴",
             "close": "오버레이 숨기기 · 측정 계속",
             "card": "종료 요약 닫기",
@@ -1219,6 +1262,22 @@ class MeterWindow(QWidget):
                     return (f"{ATTENTION_LABELS.get(row[1], row[1])} · {row[2]} · "
                             f"{row[3] or '모델 미상'} · {speed} · 누적 {_fmt(row[9])} · "
                             f"컨텍스트 {context} · 세션 상세")
+                if self.panel == "quota":
+                    from .quota import pace_gap, representative_windows, window_key
+
+                    windows = list((self.quota or {}).get("windows") or [])
+                    index = int(value)
+                    raw = windows[index]
+                    selected = {
+                        window_key(item)
+                        for item in representative_windows(windows, self.quota_representatives)
+                    }
+                    action = "현재 대표 구독" if window_key(raw) in selected else "대표 구독으로 설정"
+                    usage = f"사용 {row[2] * 100:.0f}%" if row[2] >= 0 else "사용량 미상"
+                    gap = pace_gap(raw)
+                    pace = f"페이스 여유 {gap * 100:.0f}%p" if gap is not None and gap > 0 else "페이스 여유 없음"
+                    reset = f"{row[3]} 후 리셋" if row[3] else "리셋 시각 미상"
+                    return f"{row[0]} · {row[1]} · {usage} · {pace} · {reset} · {action}"
                 return f"{PANEL_TITLES.get(self.panel, self.panel)} 항목 {row[0]}"
             except (IndexError, TypeError, ValueError):
                 return "목록 항목"
@@ -1271,6 +1330,10 @@ class MeterWindow(QWidget):
             cost_caption(self._approx(), self._scoped().get("cost_usd")),
             f"확인 {counts['check']}개, 작업 {counts['working']}개, 대기 {counts['waiting']}개",
         ]
+        if self.panel == "projects" and self.rows:
+            bits.append("프로젝트 " + ", ".join(
+                f"{row[0]} 측정 {_fmt(row[1])} 토큰" for row in self.rows
+            ))
         if status:
             bits.append(status)
         self.setAccessibleDescription(". ".join(bits))
@@ -1491,39 +1554,50 @@ class MeterWindow(QWidget):
         self._hit["scope"] = (x + w - bar - lw, y, lw, MODE_BTN * s)
         self._draw_modes(x + w - bar, y)
 
-        y = y0 + 26 * s
-        rate = f"{self.rate:.1f}" if 0 < self.rate < 10 else _fmt(self.rate)
-        money = cost_caption(self._approx(), tot.get("cost_usd"))
+        # 숫자가 절대 다른 상태에 밀려나지 않는 산업용 택시 미터 베젤.
+        display_y, display_h = y0 + 27 * s, 43 * s
+        side_w, gap = 88 * s, 7 * s
+        digit_w = max(120 * s, w - side_w - gap)
+        pulse_alpha = int(90 + 110 * self.pulse) if self.rate > 0 else 42
+        p.fillRect(QRectF(x, display_y, digit_w, display_h),
+                   _c(self.colors["background_primary"], 255))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(_c(self.colors["tint"], pulse_alpha))
+        p.drawRect(QRectF(x + 0.5 * s, display_y + 0.5 * s,
+                          digit_w - s, display_h - s))
+        p.fillRect(QRectF(x, display_y, 2 * s, display_h),
+                   _c(self.colors["tint"], pulse_alpha))
+
+        rate = f"{self.rate:,.1f}"
+        self._f(7.0, True, mono=True)
+        self._text(x + 8 * s, display_y + 3 * s, digit_w - 16 * s, 10 * s,
+                   "OUTPUT · TOKENS / SEC", self.colors["tint"], alpha=190)
+        self._f(25.5, True, mono=True)
+        self._text(x + 8 * s, display_y + 9 * s, digit_w - 16 * s, 31 * s, rate,
+                   self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"],
+                   right=True)
+
+        side_x = x + digit_w + gap
+        state_color = self.colors["destructive"] if counts["check"] else (
+            self.colors["success"] if self.rate > 0 else self.colors["text_tertiary"]
+        )
+        p.fillRect(QRectF(side_x, display_y, side_w, 19 * s), _c(state_color, 28))
+        self._f(8.5, True, mono=True)
+        state = f"확인 {counts['check']}" if counts["check"] else ("RUN" if self.rate > 0 else "IDLE")
+        self._text(side_x + 6 * s, display_y, side_w - 12 * s, 19 * s, state, state_color)
         if counts["check"]:
-            side = min(150 * s, w * 0.46)
-            p.fillRect(QRectF(x, y, 72 * s, 24 * s), _c(self.colors["destructive"], 30))
-            self._f(12, True)
-            self._text(x + 6 * s, y, 68 * s, 24 * s, f"확인 {counts['check']}",
-                       self.colors["destructive"])
-            project = self._check_project()
-            self._f(8.5, True)
-            self._text(x + 78 * s, y, max(0.0, w - side - 82 * s), 24 * s,
-                       project or "세션 목록에서 확인")
-            self._hit["attention"] = (x, y, max(96 * s, w - side - 4 * s), 24 * s)
-            self._f(7.5, True, mono=True)
-            self._text(x, y, w, 12 * s, f"전체 출력 {rate} tok/s",
-                       self.colors["text_tertiary"], right=True)
-            self._text(x, y + 12 * s, w, 12 * s, money,
-                       self.colors["text_tertiary"], right=True)
-        else:
-            self._f(19, True, mono=True)
-            self._text(x, y, w, 26 * s, rate,
-                       self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"])
-            self._f(9, True)
-            rate_w = min(w * 0.48, 13 * s * (len(rate) + 1))
-            self._text(x + rate_w, y, w - rate_w, 26 * s, "전체 출력 tok/s",
-                       self.colors["text_tertiary"])
-            self._f(10, True, mono=True)
-            self._text(x, y, w, 26 * s, money, self.colors["text_tertiary"], right=True)
+            self._hit["attention"] = (side_x, display_y, side_w, 19 * s)
+        self._f(7.5, True, mono=True)
+        self._text(side_x, display_y + 20 * s, side_w, 10 * s, "API VALUE",
+                   self.colors["text_tertiary"], right=True)
+        self._f(8.5, True, mono=True)
+        self._text(side_x, display_y + 29 * s, side_w, 13 * s,
+                   money_caption(self._approx(), tot.get("cost_usd")),
+                   self.colors["text_secondary"], right=True)
 
         # 세그먼트 게이지가 TokenMeter의 고유한 glanceable identity다.
-        y = y0 + 55 * s
-        gw, bar_h, lit = w / SEGMENTS, 9 * s, self.gauge * SEGMENTS
+        y = y0 + 76 * s
+        gw, bar_h, lit = w / SEGMENTS, 11 * s, self.gauge * SEGMENTS
         for i in range(SEGMENTS):
             position = i / (SEGMENTS - 1.0)
             on = i < lit
@@ -1536,7 +1610,13 @@ class MeterWindow(QWidget):
             p.fillRect(QRectF(px, y - 2 * s, 1.6 * s, bar_h + 4 * s),
                        _c(self.colors["text_primary"], 150))
 
-        y = y0 + 70 * s
+        self._f(6.5, True, mono=True)
+        self._text(x, y0 + 89 * s, w, 10 * s, "OUTPUT FLOW",
+                   self.colors["text_tertiary"], alpha=170)
+        self._text(x, y0 + 89 * s, w, 10 * s, f"FULL {_fmt(self.full_scale)}/s",
+                   self.colors["text_tertiary"], right=True, alpha=170)
+
+        y = y0 + 104 * s
         cache = _int(tot.get("cache_read")) + _int(tot.get("cache_write"))
         saved = _float(tot.get("cache_saved_usd"))
         cw = w / 4.0
@@ -1566,7 +1646,9 @@ class MeterWindow(QWidget):
         self._f(7.5, True, mono=True)
         for i, (text, status) in enumerate(marks):
             color = self.colors["destructive"] if status == "exhausted" else (
-                self.colors["warning"] if status in ("warn", "stale") else self.colors["text_tertiary"]
+                self.colors["warning"] if status in ("warn", "stale") else (
+                    self.colors["success"] if status == "underused" else self.colors["text_tertiary"]
+                )
             )
             self._text(x + i * cw, y, cw, CHIP_H * s, text, color)
             self._hit[f"chip:{i}"] = (x + i * cw, y, cw, CHIP_H * s)
@@ -1601,19 +1683,20 @@ class MeterWindow(QWidget):
         h = float(self.height())
         tot = self._scoped()
         checks = self._counts().get("check", 0)
+        rate = mini_rate_caption(self.rate)
+        rate_w = MINI_RATE_W * s
+        p.fillRect(QRectF(x, y + 3 * s, rate_w, h - 6 * s),
+                   _c(self.colors["tint"], 18 if self.rate > 0 else 8))
+        self._f(9.5, True, mono=True)
+        self._text(x + 4 * s, y, rate_w - 8 * s, h, rate,
+                   self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"],
+                   right=True)
         if checks:
             pulse = 1.0 if self.reduce_motion else 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self.t * 4.0))
-            badge = f"확인 {checks}"
-            self._f(8.5, True)
-            self._text(x, y, 52 * s, h, badge, self.colors["destructive"],
-                       alpha=int(140 + 115 * pulse))
-            gx0 = 56 * s
-        else:
-            rate = f"{self.rate:.1f}" if 0 < self.rate < 10 else _fmt(self.rate)
-            self._f(9, True, mono=True)
-            self._text(x, y, 46 * s, h, f"{rate}/s",
-                       self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"])
-            gx0 = 50 * s
+            p.fillRect(QRectF(x, y + 3 * s, 2 * s, h - 6 * s),
+                       _c(self.colors["destructive"], int(140 + 115 * pulse)))
+            self._hit["attention"] = (x, y, rate_w, h)
+        gx0 = rate_w + 5 * s
         self._f(8.5, True, mono=True)
         money = money_caption(self._approx(), tot.get("cost_usd"))
         self._text(x, y, w - MODE_BTN * s, h, money, self.colors["text_secondary"], right=True)
@@ -1809,6 +1892,8 @@ class MeterWindow(QWidget):
             if self.open_key:
                 bottom = self._draw_session_detail(x, bottom, w)
             return bottom
+        if self.panel == "projects":
+            return self._draw_project_rows(x, y, w, rows)
         if self.panel == "rates":
             return self._draw_rate_rows(x, y, w, rows)
         if self.panel == "quota":
@@ -1892,36 +1977,93 @@ class MeterWindow(QWidget):
                        self.colors["text_tertiary"], alpha=150)
         return y + max(1, len(rows)) * ROW_H * s + 6 * s
 
-    def _draw_quota_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
+    def _draw_project_rows(self, x: float, y: float, w: float, rows: List[ProjectRow]) -> float:
+        """비용 추정 없이 관측된 토큰과 마지막 활동만 보여준다."""
         s, p = self.scale, self._painter
         self._f(7.5, True)
+        self._text(x, y, w * 0.54, COLHEAD_H * s, "프로젝트",
+                   self.colors["text_tertiary"], alpha=180)
+        self._text(x + w * 0.54, y, w * 0.23, COLHEAD_H * s, "최근 세션",
+                   self.colors["text_tertiary"], alpha=180)
+        self._text(x + w * 0.77, y, w * 0.23 - 6 * s, COLHEAD_H * s, "누적 토큰",
+                   self.colors["text_tertiary"], right=True, alpha=180)
+        y += COLHEAD_H * s
+        top = max([row[1] for row in rows] or [0]) or 1
+        for i, (project, tokens, last_seen) in enumerate(rows):
+            ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
+            p.fillRect(QRectF(x, ry, w * _clamp(tokens / top, 0.0, 1.0), h),
+                       _c(self.colors["tint"], 14))
+            if i == 0:
+                p.fillRect(QRectF(x, ry, 2 * s, h), _c(self.colors["tint"]))
+            self._f(9.0, i == 0)
+            shown = QFontMetricsF(self._font).elidedText(
+                project, Qt.TextElideMode.ElideRight, w * 0.51,
+            )
+            self._text(x + 6 * s, ry, w * 0.52, h, shown,
+                       self.colors["text_primary"] if i == 0 else self.colors["text_secondary"])
+            self._f(7.5, mono=True)
+            self._text(x + w * 0.54, ry, w * 0.23, h, _stamp(last_seen),
+                       self.colors["text_tertiary"])
+            self._f(9.0, True, mono=True)
+            self._text(x + w * 0.77, ry, w * 0.23 - 6 * s, h, _fmt(tokens),
+                       self.colors["tint"], right=True)
+        if not rows:
+            self._f(8)
+            self._text(x, y, w, ROW_H * s, "측정된 프로젝트 토큰이 없습니다",
+                       self.colors["text_tertiary"], alpha=150)
+        return y + max(1, len(rows)) * ROW_H * s + 6 * s
+
+    def _draw_quota_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
+        from .quota import can_represent, pace_gap, representative_windows, window_key
+
+        s, p = self.scale, self._painter
+        windows = list((self.quota or {}).get("windows") or [])
+        representative_keys = {
+            window_key(row) for row in representative_windows(windows, self.quota_representatives)
+        }
+        self._f(7.5, True)
         self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", self.colors["text_tertiary"], alpha=180)
-        self._text(x + w * 0.30, y, w * 0.22, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=180)
-        self._text(x + w * 0.52, y, w * 0.22 - 4 * s, COLHEAD_H * s,
-                   "사용량", self.colors["text_tertiary"], right=True, alpha=180)
-        self._text(x + w * 0.74, y, w * 0.26 - 6 * s, COLHEAD_H * s,
-                   "다음 리셋", self.colors["text_tertiary"], right=True, alpha=180)
+        self._text(x + w * 0.30, y, w * 0.16, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=180)
+        self._text(x + w * 0.46, y, w * 0.17 - 3 * s, COLHEAD_H * s,
+                   "사용", self.colors["text_tertiary"], right=True, alpha=180)
+        self._text(x + w * 0.63, y, w * 0.21 - 3 * s, COLHEAD_H * s,
+                   "페이스", self.colors["text_tertiary"], right=True, alpha=180)
+        self._text(x + w * 0.84, y, w * 0.16 - 6 * s, COLHEAD_H * s,
+                   "리셋", self.colors["text_tertiary"], right=True, alpha=180)
         y += COLHEAD_H * s
         for i, (title, label, used, reset, status) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
+            raw = windows[i] if i < len(windows) and isinstance(windows[i], dict) else {}
+            gap = pace_gap(raw)
+            underused = gap is not None and gap > 0
+            representative = bool(raw) and window_key(raw) in representative_keys
             if used >= 0:
                 hot = status in ("warn", "exhausted")
                 p.fillRect(QRectF(x, ry, w * _clamp(used, 0.0, 1.0), h),
                            _c(self.colors["destructive"] if status == "exhausted" else self.colors["warning"],
                               22 if hot else 12))
+            if underused:
+                p.fillRect(QRectF(x, ry, w, h), _c(self.colors["success"], 18))
+                p.fillRect(QRectF(x, ry, 2 * s, h), _c(self.colors["success"]))
             color = self.colors["destructive"] if status == "exhausted" else (
                 self.colors["warning"] if status == "warn" else self.colors["text_primary"]
             )
             self._f(8.5, True)
-            self._text(x + 6 * s, ry, w * 0.28, h, title, color)
+            self._text(x + 6 * s, ry, w * 0.28, h, ("★ " if representative else "") + title, color)
             self._f(8.5)
-            self._text(x + w * 0.30, ry, w * 0.22, h, label, self.colors["text_secondary"])
-            pct = f"사용 {used * 100:.0f}%" if used >= 0 else "미상"
+            self._text(x + w * 0.30, ry, w * 0.16, h, label, self.colors["text_secondary"])
+            pct = f"{used * 100:.0f}%" if used >= 0 else "미상"
             self._f(8.5, mono=True)
-            self._text(x + w * 0.52, ry, w * 0.22 - 4 * s, h, pct,
+            self._text(x + w * 0.46, ry, w * 0.17 - 3 * s, h, pct,
                        self.colors["text_tertiary"], right=True)
-            self._text(x + w * 0.74, ry, w * 0.26 - 6 * s, h,
+            self._text(x + w * 0.63, ry, w * 0.21 - 3 * s, h,
+                       f"여유 {gap * 100:.0f}%p" if underused else "—",
+                       self.colors["success"] if underused else self.colors["text_tertiary"],
+                       right=True)
+            self._text(x + w * 0.84, ry, w * 0.16 - 6 * s, h,
                        reset or "미상", self.colors["text_tertiary"], right=True)
+            if can_represent(raw):
+                self._hit[f"row:{i}"] = (x, ry, w, ROW_H * s)
         if not rows:
             self._f(8)
             self._text(x, y, w, ROW_H * s, "한도 없음", self.colors["text_tertiary"], alpha=150)
@@ -2115,7 +2257,7 @@ class MeterWindow(QWidget):
             self._toggle_scope()
             return True
         if target == "attention":
-            self.panel, self.session_filter, self.rows_on, self.scroll = "sessions", "check", True, 0
+            self.panel, self.session_filter, self.rows_on, self.scroll = "sessions", "all", True, 0
             self.open_key = ""
             self.focus = None
             self._rebuild_rows()
@@ -2170,6 +2312,9 @@ class MeterWindow(QWidget):
         rows = self.rows[:self._row_count()]
         if not 0 <= index < len(rows):
             return
+        if self.panel == "quota":
+            self._set_quota_representative(index)
+            return
         if self.panel == "sessions":
             key = str(rows[index][0])
             project = str(rows[index][2]).split("/")[-1]
@@ -2210,6 +2355,24 @@ class MeterWindow(QWidget):
         self.scroll = 0
         self.open_key = ""
         self.focus = None
+        self._rebuild_rows()
+        self._store_prefs()
+        self.update()
+
+    def _set_quota_representative(self, index: int) -> None:
+        from .quota import can_represent, window_key
+
+        windows = list((self.quota or {}).get("windows") or [])
+        if not 0 <= index < len(windows) or not isinstance(windows[index], dict):
+            return
+        row = windows[index]
+        if not can_represent(row):
+            return
+        source = str(row.get("source") or "")
+        if not source:
+            return
+        self.quota_representatives[source] = window_key(row)
+        self._feedback = f"{row.get('title') or source} {row.get('label') or ''} · 대표 설정"
         self._rebuild_rows()
         self._store_prefs()
         self.update()
@@ -2321,7 +2484,7 @@ class MeterWindow(QWidget):
             self._scroll_rows(d)
 
     def _scroll_rows(self, delta: float) -> None:
-        """세션 목록 스크롤. 델타를 모아 한 줄치가 차면 넘긴다 (트랙패드가 잘게 보낸다)."""
+        """세션·프로젝트 목록 스크롤. 델타를 모아 한 줄치가 차면 넘긴다."""
         self._wheel += delta
         step = int(self._wheel / WHEEL_LINE)  # 0 방향 절삭이라 음수도 그대로 맞는다
         if not step:
@@ -2375,6 +2538,24 @@ class MeterWindow(QWidget):
             mark = "● " if self.panel == "sessions" and name == self.session_filter else "   "
             self._act(filters, mark + SESSION_FILTER_TITLES[name],
                       lambda _=False, n=name: self._set_filter(n))
+
+        windows = list((self.quota or {}).get("windows") or [])
+        if windows:
+            from .quota import can_represent, representative_windows, window_key
+
+            representatives = {
+                window_key(row)
+                for row in representative_windows(windows, self.quota_representatives)
+            }
+            quota_menu = menu.addMenu("대표 구독")
+            quota_menu.setStyleSheet(self._menu_style())
+            for index, row in enumerate(windows):
+                if not isinstance(row, dict) or not can_represent(row):
+                    continue
+                mark = "● " if window_key(row) in representatives else "   "
+                label = f"{row.get('title') or row.get('source') or '-'} · {row.get('label') or '-'}"
+                self._act(quota_menu, mark + label,
+                          lambda _=False, i=index: self._set_quota_representative(i))
 
         sizes = menu.addMenu(f"창 크기 ({self.scale * 100:.0f}%)")
         sizes.setStyleSheet(self._menu_style())
@@ -2687,6 +2868,13 @@ def _demo() -> None:
                                      "cache_saved_usd": 12.0}},
                 "days": {"2026-08-09": {"cost_usd": 2.0, "output_tokens": 20},
                          "2026-08-10": {"cost_usd": 3.0, "output_tokens": 30}},
+                "projects": {
+                    "older": {"last_seen": now - 200, "totals": {"output_tokens": 20}},
+                    "latest": {"last_seen": now - 10,
+                               "totals": {"input_tokens": 10, "cache_read": 5,
+                                          "output_tokens": 30}},
+                    "empty": {"last_seen": now, "totals": {"cost_usd": 1.0}},
+                },
                 "sessions": {"claude-code/s1": {"project": "tokenmeter", "last_seen": now - 20,
                                                 "model": "claude-opus-5", "vendor": "anthropic",
                                                 "effort": "xhigh", "started_at": 1786377600.0,
@@ -2697,7 +2885,7 @@ def _demo() -> None:
                                                 "totals": {"cost_usd": 0.5, "output_tokens": 4}},
                              "claude-code/s3": {"project": "waiting", "last_seen": now - 120,
                                                 "totals": {"cost_usd": 0.0, "output_tokens": 0}},
-                             "claude-code/s4": {"project": "done", "last_seen": now - 300,
+                             "claude-code/s4": {"project": "done", "last_seen": now - 7200,
                                                 "totals": {"cost_usd": 0.0, "output_tokens": 0}}},
                 "live": [{"service": "claude-code", "session_id": "s1", "attention": "check",
                           "attention_at": now - 5},
@@ -2723,6 +2911,12 @@ def _demo() -> None:
     assert rows[0][4] and rows[0][3] == 1.0 and not rows[1][4], rows
     assert "6.00" in note, note  # 1 + 3 + 2
 
+    # 프로젝트는 비용 추정 없이 측정 토큰만, 마지막 활동 최신순이다.
+    w.panel = "projects"
+    project_rows, project_note = w._build_rows()
+    assert project_rows == [("latest", 45, now - 10), ("older", 20, now - 200)], project_rows
+    assert "측정 65 토큰" in project_note and all(row[0] != "empty" for row in project_rows)
+
     # 세션 목록: 상태 · 프로젝트 · 메인 속도 · 누적 · 컨텍스트를 분리한다.
     w.panel = "sessions"
     w.session_filter = "all"
@@ -2736,12 +2930,12 @@ def _demo() -> None:
                        "openai", True, "", 4, 0.0, False, 0.0), rows[1]
     assert len(opened) == 11, "날짜~분까지만 — 초는 붙지 않는다"
 
-    # 기본 필터는 라이브 — 종료를 숨긴다. 확인만은 확인 줄만 남긴다.
+    # 보이는 필터는 LIVE / ARCHIVE 두 그룹과 둘을 합친 ALL뿐이다.
     w.session_filter = "live"
     live_rows, _ = w._build_rows()
     assert [row[1] for row in live_rows] == ["check", "working", "waiting"], live_rows
-    w.session_filter = "check"
-    assert [row[1] for row in w._build_rows()[0]] == ["check"]
+    w.session_filter = "archive"
+    assert [row[1] for row in w._build_rows()[0]] == ["done"]
     w.session_filter = "all"
 
     # 속도 패널은 프로바이더/모델 행을 만들고, 빈 기록에도 죽지 않는다
@@ -2833,7 +3027,7 @@ def _demo() -> None:
                 ww, wh = w._size()
                 w.resize(ww, wh)
                 extra = (COLHEAD_H + (0 if w.expanded else BTN_H)) if panel == "rates" else (
-                    COLHEAD_H if panel == "quota" else 0
+                    COLHEAD_H if panel in ("quota", "projects") else 0
                 )
                 if panel == "sessions":
                     extra = FILTER_H + COLHEAD_H

@@ -71,6 +71,14 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
         token_at = _float(rec.get("last_seen"))
         signal = str((active or {}).get("attention") or "")
         signal_at = _float((active or {}).get("attention_at") or (active or {}).get("updated_at"))
+        started_at = _float(rec.get("started_at") or (active or {}).get("started_at"))
+        activity_at = max(
+            token_at,
+            signal_at,
+            _float((active or {}).get("updated_at")),
+            _float((active or {}).get("event_at")),
+            started_at,
+        )
         if active is None:
             attention = "done"
         elif signal == "check" and signal_at > 0 and signal_at >= token_at:
@@ -96,8 +104,8 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
             "project": project if isinstance(project, str) else "(unknown)",
             "model": model if isinstance(model, str) else "",
             "effort": rec.get("effort") or "", "vendor": rec.get("vendor") or "",
-            "plan": rec.get("plan") or "unknown", "started_at": _float(
-                rec.get("started_at") or (active or {}).get("started_at")), "last_seen": token_at,
+            "plan": rec.get("plan") or "unknown", "started_at": started_at,
+            "last_seen": token_at, "activity_at": activity_at,
             "totals": totals,
             "cost_usd": _float(totals.get("cost_usd")),
             "main_output_tokens": max(0, _int(totals.get("output_tokens")) - sub_output),

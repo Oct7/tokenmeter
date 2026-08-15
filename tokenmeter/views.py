@@ -6,6 +6,7 @@ Qt 를 모른다. 상태 dict 와 숫자만 받아 화면에 쓸 문자열을 �
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any, Dict, List
 
 CHECK_REASONS = {
@@ -19,8 +20,9 @@ CHECK_REASONS = {
     "Notification": "알림",
 }
 
-SESSION_FILTERS = ("check", "live", "all")
-SESSION_FILTER_TITLES = {"check": "확인만", "live": "라이브", "all": "전부"}
+SESSION_FILTERS = ("live", "archive", "all")
+SESSION_FILTER_TITLES = {"live": "LIVE", "archive": "ARCHIVE", "all": "ALL"}
+SESSION_ARCHIVE_SECONDS = 3600.0
 
 
 def check_reason(event: Any) -> str:
@@ -101,11 +103,27 @@ def header_attention(counts: Dict[str, Any], project: str) -> str:
     return f"확인 {n} · {name}" if name else f"확인 {n}"
 
 
-def filter_sessions(rows: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
-    if mode == "check":
-        return [row for row in rows if row.get("attention") == "check"]
+def filter_sessions(
+    rows: List[Dict[str, Any]], mode: str, now: float | None = None,
+) -> List[Dict[str, Any]]:
+    """세션을 최근 활동 1시간 기준 LIVE / ARCHIVE 두 그룹으로 나눈다."""
+    if mode == "all":
+        return list(rows)
+    now = time.time() if now is None else now
+
+    def recent(row: Dict[str, Any]) -> bool:
+        if row.get("live"):
+            return True  # 장시간 실행 중인 실제 라이브 세션은 활동 간격과 무관하게 LIVE다.
+        try:
+            activity = float(row.get("activity_at") or row.get("last_seen") or 0)
+        except (TypeError, ValueError):
+            activity = 0.0
+        return activity > 0 and now - activity < SESSION_ARCHIVE_SECONDS
+
+    if mode == "archive":
+        return [row for row in rows if not recent(row)]
     if mode == "live":
-        return [row for row in rows if row.get("live")]
+        return [row for row in rows if recent(row)]
     return list(rows)
 
 

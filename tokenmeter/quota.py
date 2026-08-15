@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -87,13 +88,48 @@ def reset_caption(ts: Any, now: float) -> str:
     return f"{sec // 86400}일"
 
 
-def chips(windows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
-    picked: Dict[str, Dict[str, Any]] = {}
+def window_key(row: Dict[str, Any]) -> str:
+    """설정에 저장할 한도 창의 exact key. label이 scoped 창을 구분한다."""
+    return ":".join(str(row.get(name) or "") for name in ("source", "kind", "label"))
+
+
+def can_represent(row: Dict[str, Any]) -> bool:
+    """상단 대표 칩으로 실제 표시할 값이 있는 한도 창인가."""
+    return bool(row.get("source")) and row.get("status") != "unavailable" and (
+        row.get("used") is not None or row.get("remaining_usd") is not None
+    )
+
+
+def representative_windows(
+    windows: List[Dict[str, Any]],
+    preferences: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """프로바이더별 대표 창. CC는 기본 주간, 나머지는 기존 첫 창을 유지한다."""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in windows:
-        src = str(row.get("source") or "")
-        if src in picked or row.get("status") == "unavailable":
-            continue
-        picked[src] = row
+        source = str(row.get("source") or "")
+        if can_represent(row):
+            grouped.setdefault(source, []).append(row)
+
+    preferences = preferences if isinstance(preferences, dict) else {}
+    picked: List[Dict[str, Any]] = []
+    for source, rows in grouped.items():
+        preference = str(preferences.get(source) or "")
+        row = next((item for item in rows if window_key(item) == preference), None)
+        if row is None and preference:
+            row = next((item for item in rows if item.get("kind") == preference), None)
+        if row is None and source == "claude-code":
+            row = next((item for item in rows if item.get("kind") == "weekly"), None)
+        picked.append(row or rows[0])
+    return picked
+
+
+def chips(
+    windows: List[Dict[str, Any]],
+    preferences: Optional[Dict[str, str]] = None,
+) -> List[Tuple[str, str]]:
+    picked = {str(row.get("source") or ""): row
+              for row in representative_windows(windows, preferences)}
     out: List[Tuple[str, str]] = []
     for src in ("claude-code", "codex", "grok"):
         row = picked.get(src)
@@ -107,8 +143,35 @@ def chips(windows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
             text = f"{tag} ${float(row['remaining_usd']):.1f}"
         else:
             continue
-        out.append((text, str(row.get("status") or "ok")))
+        status = str(row.get("status") or "ok")
+        out.append((text, "underused" if status == "ok" and is_underused(row) else status))
     return out
+
+
+def pace_gap(row: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
+    """기간 경과율 - 사용률을 반환한다. 양수면 계획보다 덜 썼다."""
+    if str(row.get("status") or "").lower() in {"stale", "unavailable", "expired"}:
+        return None
+    if row.get("plan") not in (None, "", "subscription"):
+        return None
+    try:
+        used = float(row["used"])
+        period = float(row["period_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    now = time.time() if now is None else now
+    reset_value = row.get("resets_at")
+    reset = float(reset_value) if isinstance(reset_value, (int, float)) else _ts(reset_value, now)
+    if (not math.isfinite(used) or not math.isfinite(period) or period <= 0
+            or reset is None or not math.isfinite(reset) or reset <= now):
+        return None
+    elapsed = max(0.0, min(1.0, 1.0 - (reset - now) / period))
+    return elapsed - used
+
+
+def is_underused(row: Dict[str, Any], now: Optional[float] = None) -> bool:
+    gap = pace_gap(row, now)
+    return gap is not None and gap > 0
 
 
 def panel_rows(windows: List[Dict[str, Any]], now: Optional[float] = None) -> List[Tuple[str, str, float, str, str]]:
@@ -146,15 +209,18 @@ def parse_claude(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
             kind = str(item.get("kind") or "")
             if kind == "session":
                 rows.append(_window("claude-code", "session", "5h", item.get("percent"),
-                                    item.get("resets_at"), now, percent=True))
+                                    item.get("resets_at"), now, percent=True,
+                                    period_seconds=5 * 3600))
             elif kind == "weekly_all":
                 rows.append(_window("claude-code", "weekly", "주간", item.get("percent"),
-                                    item.get("resets_at"), now, percent=True))
+                                    item.get("resets_at"), now, percent=True,
+                                    period_seconds=7 * 86400))
             elif kind == "weekly_scoped":
                 name = str((((item.get("scope") or {}).get("model") or {}).get("display_name"))
                            or "모델")
                 rows.append(_window("claude-code", "weekly_scoped", f"{name} 주",
-                                    item.get("percent"), item.get("resets_at"), now, percent=True))
+                                    item.get("percent"), item.get("resets_at"), now, percent=True,
+                                    period_seconds=7 * 86400))
     else:
         mapping = (
             ("five_hour", "session", "5h"),
@@ -167,7 +233,8 @@ def parse_claude(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
             if not isinstance(node, dict):
                 continue
             rows.append(_window("claude-code", kind, label, node.get("utilization"),
-                                node.get("resets_at"), now, percent=True))
+                                node.get("resets_at"), now, percent=True,
+                                period_seconds=5 * 3600 if kind == "session" else 7 * 86400))
     extra = data.get("extra_usage")
     if isinstance(extra, dict) and extra.get("is_enabled"):
         cap = _money(extra.get("monthly_limit"), cents=True)
@@ -188,10 +255,12 @@ def parse_codex(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
     secondary = limit.get("secondary_window") if isinstance(limit, dict) else None
     if isinstance(primary, dict):
         rows.append(_window("codex", "session", _codex_label(primary, "5h"),
-                            _used_field(primary), _reset_field(primary), now, percent=True))
+                            _used_field(primary), _reset_field(primary), now, percent=True,
+                            period_seconds=_codex_period(primary, 5 * 3600)))
     if isinstance(secondary, dict):
         rows.append(_window("codex", "weekly", _codex_label(secondary, "주간"),
-                            _used_field(secondary), _reset_field(secondary), now, percent=True))
+                            _used_field(secondary), _reset_field(secondary), now, percent=True,
+                            period_seconds=_codex_period(secondary, 7 * 86400)))
     extras = data.get("additional_rate_limits")
     if not isinstance(extras, list) and isinstance(limit, dict):
         extras = limit.get("additional_rate_limits")
@@ -203,7 +272,8 @@ def parse_codex(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
             win = nested.get("primary_window") if isinstance(nested.get("primary_window"), dict) else nested
             name = str(item.get("limit_name") or item.get("title") or item.get("name") or "추가")
             rows.append(_window("codex", "weekly_scoped", name, _used_field(win),
-                                _reset_field(win), now, percent=True))
+                                _reset_field(win), now, percent=True,
+                                period_seconds=_codex_period(win, 7 * 86400)))
     credits = data.get("credits")
     if isinstance(credits, dict) and not credits.get("unlimited"):
         try:
@@ -221,12 +291,15 @@ def parse_grok(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
     used = cfg.get("creditUsagePercent") if isinstance(cfg, dict) else None
     percent = used is not None
     reset = None
-    period = None
+    start = None
+    period: Dict[str, Any] = {}
     if isinstance(cfg, dict):
-        period = cfg.get("currentPeriod")
-        if isinstance(period, dict):
+        if isinstance(cfg.get("currentPeriod"), dict):
+            period = cfg["currentPeriod"]
             reset = period.get("end")
+            start = period.get("start")
         reset = reset or cfg.get("billingPeriodEnd")
+        start = start or cfg.get("billingPeriodStart")
     if used is None:
         limit = _cents_val(data.get("monthlyLimit"))
         if limit is None and isinstance(cfg, dict):
@@ -239,11 +312,12 @@ def parse_grok(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
             used = spent / limit
             percent = False
     cycle = data.get("billingCycle")
-    if reset is None and isinstance(cycle, dict):
-        reset = cycle.get("billingPeriodEnd")
+    if isinstance(cycle, dict):
+        reset = reset or cycle.get("billingPeriodEnd")
+        start = start or cycle.get("billingPeriodStart")
     if used is None:
         return []
-    ptype = str((period or {}).get("type") or "")
+    ptype = str(period.get("type") or ((cycle or {}).get("type") if isinstance(cycle, dict) else "")).upper()
     if "WEEKLY" in ptype:
         label = "주간"
     elif "MONTHLY" in ptype:
@@ -257,7 +331,13 @@ def parse_grok(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
                 label = "주간"
             elif days >= 9 * 86400:
                 label = "월간"
-    return [_window("grok", "credits", label, used, reset, now, percent=percent)]
+    reset_ts, start_ts = _ts(reset, now), _ts(start, now)
+    span = reset_ts - start_ts if reset_ts is not None and start_ts is not None else None
+    if span is None or span <= 0:
+        # ponytail: 시작 시각이 없는 월간 응답은 30일로 본다. 제공자가 start를 주면 위의 실기간이 이긴다.
+        span = 7 * 86400 if label == "주간" else 30 * 86400 if label == "월간" else None
+    return [_window("grok", "credits", label, used, reset, now, percent=percent,
+                    period_seconds=span)]
 
 
 def refresh(
@@ -329,6 +409,7 @@ def _window(
     remaining_usd: Optional[float] = None,
     cap_usd: Optional[float] = None,
     percent: bool = False,
+    period_seconds: Any = None,
 ) -> Dict[str, Any]:
     ratio = _ratio(used, percent=percent)
     return {
@@ -341,6 +422,7 @@ def _window(
         "remaining_usd": remaining_usd,
         "cap_usd": cap_usd,
         "resets_at": _ts(reset, now),
+        "period_seconds": _positive_seconds(period_seconds),
         "status": _status(ratio),
         "note": "",
         "fetched_at": now,
@@ -384,6 +466,18 @@ def _codex_label(node: Dict[str, Any], fallback: str) -> str:
     if span <= 10 * 86400:
         return "주간"
     return "월간"
+
+
+def _codex_period(node: Dict[str, Any], fallback: int) -> Optional[float]:
+    return _positive_seconds(node.get("limit_window_seconds")) or float(fallback)
+
+
+def _positive_seconds(value: Any) -> Optional[float]:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
 def _ts(value: Any, now: float) -> Optional[float]:

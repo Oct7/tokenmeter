@@ -2386,8 +2386,8 @@ def test_meter_records_active_output_rate(tmp: Path) -> None:
 def test_overlay_view_helpers(tmp: Path) -> None:
     """헤더·비용·컨텍스트·건강 문구는 오버레이가 아니라 순수 함수가 만든다."""
     from tokenmeter.views import (
-        check_reason, ctx_caption, filter_sessions, header_attention,
-        health_note, money_caption, project_label,
+        SESSION_FILTERS, SESSION_FILTER_TITLES, check_reason, ctx_caption,
+        filter_sessions, header_attention, health_note, money_caption, project_label,
     )
 
     assert check_reason("PermissionRequest") == "권한"
@@ -2421,14 +2421,16 @@ def test_overlay_view_helpers(tmp: Path) -> None:
     counts = {"check": 2, "working": 1, "waiting": 0, "risk": 0}
     assert header_attention(counts, "api-server") == "확인 2 · api-server"
     assert header_attention({"check": 0, "working": 1}, "") == ""
+    assert SESSION_FILTERS == ("live", "archive", "all")
+    assert [SESSION_FILTER_TITLES[name] for name in SESSION_FILTERS] == ["LIVE", "ARCHIVE", "ALL"]
 
     rows = [
-        {"attention": "check", "live": True, "project": "a"},
-        {"attention": "working", "live": True, "project": "b"},
-        {"attention": "done", "live": False, "project": "c"},
+        {"attention": "check", "live": True, "activity_at": now - 7200, "project": "a"},
+        {"attention": "done", "live": False, "activity_at": now - 3599, "project": "b"},
+        {"attention": "done", "live": False, "activity_at": now - 3600, "project": "c"},
     ]
-    assert [r["project"] for r in filter_sessions(rows, "check")] == ["a"]
-    assert [r["project"] for r in filter_sessions(rows, "live")] == ["a", "b"]
+    assert [r["project"] for r in filter_sessions(rows, "live", now)] == ["a", "b"]
+    assert [r["project"] for r in filter_sessions(rows, "archive", now)] == ["c"]
     assert len(filter_sessions(rows, "all")) == 3
 
 
@@ -2448,11 +2450,22 @@ def test_session_views_include_event_and_cwd(tmp: Path) -> None:
     assert rows["claude-code/a"]["event"] == "PermissionRequest"
     assert rows["claude-code/a"]["cwd"] == "/tmp/shop/api"
     assert rows["claude-code/a"]["cost_usd"] == 0.4
+    assert rows["claude-code/a"]["activity_at"] == now - 1
 
 
 def test_quota_parses_provider_payloads(tmp: Path) -> None:
     """한도는 프로바이더 응답을 정규화한다. 로컬 토큰으로 잔여를 추정하지 않는다."""
-    from tokenmeter.quota import chips, parse_claude, parse_codex, parse_grok, reset_caption
+    from tokenmeter.quota import (
+        chips,
+        is_underused,
+        pace_gap,
+        parse_claude,
+        parse_codex,
+        parse_grok,
+        representative_windows,
+        reset_caption,
+        window_key,
+    )
 
     now = 1_800_000_000.0
     claude = parse_claude({
@@ -2463,8 +2476,9 @@ def test_quota_parses_provider_payloads(tmp: Path) -> None:
     }, now)
     kinds = {row["kind"]: row for row in claude}
     assert kinds["session"]["used"] == 0.38 and kinds["session"]["label"] == "5h"
+    assert kinds["session"]["period_seconds"] == 5 * 3600
     assert parse_claude({"seven_day": {"utilization": 1.0}}, now)[0]["used"] == 0.01
-    assert kinds["weekly"]["used"] == 0.15
+    assert kinds["weekly"]["used"] == 0.15 and kinds["weekly"]["period_seconds"] == 7 * 86400
     assert kinds["weekly_scoped"]["label"] == "Sonnet 주" and kinds["weekly_scoped"]["status"] == "exhausted"
     assert kinds["credits"]["remaining_usd"] == 975.0 and kinds["credits"]["cap_usd"] == 1000.0
 
@@ -2488,6 +2502,8 @@ def test_quota_parses_provider_payloads(tmp: Path) -> None:
     }, now)
     assert [row["label"] for row in codex] == ["5h", "주간", "크레딧"]
     assert codex[0]["used"] == 0.72 and codex[0]["status"] == "warn"
+    assert codex[0]["period_seconds"] == 5 * 3600
+    assert codex[1]["period_seconds"] == 7 * 86400
     assert codex[2]["remaining_usd"] == 12.4
     weekly = parse_codex({
         "rate_limit": {"primary_window": {
@@ -2496,6 +2512,7 @@ def test_quota_parses_provider_payloads(tmp: Path) -> None:
         "credits": {"balance": 0, "has_credits": False},
     }, now)
     assert weekly[0]["label"] == "주간" and weekly[0]["used"] == 0.01
+    assert weekly[0]["period_seconds"] == 604800
     assert all(row["kind"] != "credits" for row in weekly)
 
     grok = parse_grok({
@@ -2511,14 +2528,41 @@ def test_quota_parses_provider_payloads(tmp: Path) -> None:
         "billingCycle": {"billingPeriodEnd": "2027-02-01T00:00:00Z"},
     }, now)
     assert ratio[0]["used"] == 0.25
+    exact_grok = parse_grok({
+        "config": {"creditUsagePercent": 10, "currentPeriod": {
+            "type": "WEEKLY", "start": now - 86400, "end": now + 6 * 86400,
+        }},
+    }, now)[0]
+    assert exact_grok["label"] == "주간" and exact_grok["period_seconds"] == 7 * 86400
 
     assert reset_caption(now + 90, now) == "1분"
     assert reset_caption(now + 3 * 3600, now) == "3시간"
     assert reset_caption(now + 6 * 86400, now) == "6일"
     texts = [text for text, _status in chips(claude + codex + grok)]
-    assert texts[0].startswith("CC ") and "5h" in texts[0]
+    assert texts[0].startswith("CC ") and "주간" in texts[0]
     assert any(text.startswith("CDX ") for text in texts)
     assert any(text.startswith("GRK ") for text in texts)
+
+    scoped = kinds["weekly_scoped"]
+    exact_key = window_key(scoped)
+    assert exact_key == "claude-code:weekly_scoped:Sonnet 주"
+    assert representative_windows(claude, {"claude-code": exact_key})[0] is scoped
+    assert representative_windows(claude, {"claude-code": "weekly_scoped"})[0] is scoped
+    assert representative_windows(claude, {"claude-code": "missing"})[0] is kinds["weekly"]
+    assert "Sonnet 주" in chips(claude, {"claude-code": exact_key})[0][0]
+
+    pace = dict(kinds["weekly"], used=0.20, resets_at=now + 3 * 86400,
+                period_seconds=7 * 86400)
+    assert abs((pace_gap(pace, now) or 0) - (4 / 7 - 0.20)) < 1e-12
+    assert is_underused(pace, now)
+    assert chips([dict(pace, resets_at=time.time() + 3 * 86400)])[0][1] == "underused"
+    assert not is_underused(dict(pace, used=4 / 7), now)
+    for invalid in (
+        dict(pace, status="stale"),
+        dict(pace, period_seconds=None),
+        dict(pace, resets_at=now),
+    ):
+        assert pace_gap(invalid, now) is None and not is_underused(invalid, now)
 
 
 def test_quota_refresh_uses_injected_http_and_cache(tmp: Path) -> None:

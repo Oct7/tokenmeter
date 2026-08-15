@@ -26,7 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QTimer, Qt
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QFont, QFontMetricsF, QMouseEvent
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from tokenmeter import overlay
@@ -193,7 +193,8 @@ def test_tokenmeter_controls_are_visible_before_optional_search(_tmp: Path) -> N
         window.grab()
 
         expected = {"scope", "mode:S", "mode:M", "mode:L", "panel:sessions",
-                    "panel:quota", "panel:rates", "panel:days", "filter:live"}
+                    "panel:projects", "panel:quota", "panel:rates", "panel:days",
+                    "filter:live", "filter:archive", "filter:all"}
         assert expected <= window._hit.keys(), window._hit.keys()
         assert "search" not in window._hit
         assert not window.palette_open and window._search_field.isHidden()
@@ -213,6 +214,7 @@ def test_classic_meter_visual_tokens_and_square_surface(_tmp: Path) -> None:
         "#3BE06A", "#FFC53D", "#FF5F6D",
     )
     assert overlay.HINT == "오늘/누적 · S/M/L · ⋯ 메뉴"
+    assert overlay.METER_H == 128
 
     with _window() as window:
         image = window.grab().toImage()
@@ -261,6 +263,32 @@ def test_animation_timer_slows_when_surface_is_idle(_tmp: Path) -> None:
         window.rate = 10.0
         window._tick()
         assert window._timer.interval() == window._active_interval
+
+
+def test_mini_meter_keeps_rate_unit_and_visible_gauge_during_attention(_tmp: Path) -> None:
+    with _window() as window:
+        window.status = _sessions()
+        window.mini = True
+        window.rate = 12_345.0
+        window.gauge = 0.5
+        window.resize(*window._size())
+        image = window.grab().toImage()
+
+        gauge_x = int(6 + overlay.MINI_RATE_W + 6)
+        gauge = image.pixelColor(gauge_x, image.height() // 2)
+        assert gauge.green() > gauge.red(), (gauge.red(), gauge.green(), gauge.blue())
+        font = QFont(window._data_font)
+        font.setBold(True)
+        font.setPointSizeF(9.5)
+        metrics = QFontMetricsF(font)
+        for rate in (12_345, 999_999, 10**18):
+            caption = overlay.mini_rate_caption(rate)
+            assert caption.endswith("/s") and len(caption) <= 6, caption
+            available = overlay.MINI_RATE_W - 8
+            assert metrics.horizontalAdvance(caption) <= available, (
+                caption, metrics.horizontalAdvance(caption), available,
+            )
+        assert window._controls["attention"].accessibleName() == "확인 세션을 맨 위로 전체 세션 보기"
 
 
 def test_manual_sync_does_not_block_gui_thread(_tmp: Path) -> None:
@@ -456,6 +484,61 @@ def test_quota_chip_resizes_even_when_panel_row_count_is_unchanged(_tmp: Path) -
 
         assert window._row_count() == before_rows
         assert window.height() == window._size()[1] == before_height + int(CHIP_H * window.scale)
+
+
+def test_projects_show_only_measured_tokens_in_latest_activity_order(_tmp: Path) -> None:
+    with _window() as window:
+        window.status = {"projects": {
+            "old": {"last_seen": 100.0, "totals": {"output_tokens": 20}},
+            "new": {"last_seen": 200.0, "totals": {
+                "input_tokens": 1, "cache_read": 2, "cache_write": 3, "output_tokens": 4,
+            }},
+            "cost-only": {"last_seen": 300.0, "totals": {"cost_usd": 99.0}},
+        }}
+        window.panel = "projects"
+        rows, note = window._build_rows()
+
+        assert rows == [("new", 10, 200.0), ("old", 20, 100.0)]
+        assert "측정 30 토큰" in note
+        window._rebuild_rows()
+        assert not window.grab().isNull()
+
+
+def test_quota_row_sets_and_persists_representative_window(_tmp: Path) -> None:
+    with _window() as window:
+        now = time.time()
+        window.quota = {"updated_at": now, "errors": {}, "windows": [
+            {"source": "claude-code", "title": "Claude Code", "plan": "subscription",
+             "kind": "session", "label": "5h", "used": 0.20, "resets_at": now + 3600,
+             "period_seconds": 5 * 3600, "status": "ok"},
+            {"source": "claude-code", "title": "Claude Code", "plan": "subscription",
+             "kind": "weekly", "label": "주간", "used": 0.30, "resets_at": now + 86400,
+             "period_seconds": 7 * 86400, "status": "ok"},
+            {"source": "codex", "title": "Codex", "plan": "subscription",
+             "kind": "weekly", "label": "주간", "used": 0.10, "resets_at": now + 86400,
+             "period_seconds": 7 * 86400, "status": "unavailable"},
+        ]}
+        window.panel = "quota"
+        assert "주간" in window._quota_marks()[0][0], "CC 기본 대표는 주간이다"
+
+        saved: List[Dict[str, Any]] = []
+        original = overlay._save_prefs
+        overlay._save_prefs = lambda data: saved.append(data)
+        try:
+            window._set_quota_representative(0)
+        finally:
+            overlay._save_prefs = original
+
+        key = "claude-code:session:5h"
+        assert window.quota_representatives == {"claude-code": key}
+        assert "5h" in window._quota_marks()[0][0]
+        assert saved and saved[-1]["quota_representatives"] == {"claude-code": key}
+        window.grab()
+        caption = window._controls["row:0"].accessibleName()
+        assert all(text in caption for text in ("사용 20%", "페이스 여유", "리셋", "대표 구독"))
+        assert "row:2" not in window._hit
+        window._set_quota_representative(2)
+        assert window.quota_representatives == {"claude-code": key}
 
 
 def main() -> int:
