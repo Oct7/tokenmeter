@@ -6,9 +6,10 @@
   · 위쪽은 **미터기** — 세그먼트 게이지는 로그에서 관측한 **전체 출력 처리량**(tok/s)이다.
     유입이 끊기면 지수감쇠로 내려가 0 에서 멈춘다. 곁눈질만으로 에이전트가
     일하는 중인지 알 수 있다는 점이 이 도구의 존재 이유다.
-  · 아래쪽은 **패널** — 세션 / 한도 / 속도 / 일별 / 팀. 탭으로 고른다.
+  · 아래쪽은 **현재 콘텐츠 하나** — 세션 / 한도 / 속도 / 일별 / 팀을 명령 런처로 고른다.
+  · ⌘K/Ctrl+K 검색은 세션과 명령을 같은 결과 목록에서 바로 실행한다.
   · 확인이 있으면 속도보다 확인 세션을 먼저 보여준다.
-  · 입력/출력/캐시는 색으로 구분한다 (초록/시안/앰버).
+  · 입력/출력/캐시는 이름과 절제된 의미색을 함께 써 색에만 의존하지 않는다.
 
 GUI 를 못 띄우는 환경에서는 run_overlay() 가 예외 대신 False 를 돌려준다.
 """
@@ -38,9 +39,9 @@ from .views import (
 
 try:  # PyQt6 가 없어도 import 자체는 성공해야 한다 (CLI 가 이 모듈을 import 한다)
     from PyQt6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, pyqtSignal
-    from PyQt6.QtGui import QAction, QColor, QFont, QFontMetricsF, QPainter, QPixmap
+    from PyQt6.QtGui import QAction, QColor, QFont, QFontDatabase, QFontMetricsF, QPainter, QPixmap
     from PyQt6.QtWidgets import (
-        QApplication, QMenu, QMessageBox, QSystemTrayIcon, QToolButton, QWidget,
+        QApplication, QLineEdit, QMenu, QMessageBox, QSystemTrayIcon, QToolButton, QWidget,
     )
 
     QT_ERROR = ""
@@ -53,30 +54,31 @@ except Exception as exc:  # pragma: no cover - 환경 의존
         return None
 
 # ── 상수 ──────────────────────────────────────────────────────────────────
-BASE_W = 340              # 세션 줄이 5칸이라 300 에서는 이름이 계속 잘린다
-METER_H = 104               # 24px 상단 조작부를 포함한 미터 영역
-ROW_H = 27                  # 24px 행 + 3px 간격
-FOOT_H = 22
-PAD = 11
-HEAD_H = 24                 # 아래 패널 탭 높이
-FILTER_H = 24
+SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_5, SPACE_6 = 4, 8, 12, 16, 20, 24
+RADIUS_SM, RADIUS_MD, RADIUS_LG, RADIUS_XL = 9, 12, 16, 20
+MOTION_FAST_MS, MOTION_NORMAL_MS = 120, 180
+
+BASE_W = 380
+HEADER_H = 28
+SEARCH_H = 38
+CHROME_H = HEADER_H + SPACE_2 + SEARCH_H + SPACE_3
+METER_H = 82
+ROW_H = 42
+FOOT_H = 24
+PAD = SPACE_4
+HEAD_H = 30                 # 현재 콘텐츠를 설명하는 contextual header
 # tok/s = 로그에서 관측한 **출력 토큰 델타의 처리량**. 실제 스트리밍 생성 시간은 로그에
 # 없으므로 모델 벤치마크가 아니다. 캐시 읽기는 생성된 출력이 아니어서 분자에서 제외한다.
 RATE_TAU = 20.0             # tok/s 지수평균 시정수 (초)
 # 게이지 만땅 기준 (출력 tok/s). 세션 하나가 대략 40 tok/s 이므로, 여기까지 차오르는
 # 것은 정말 많이 돌 때뿐이다. 체감이 다르면 settings.overlay.full_scale 로 조정.
 DEFAULT_FULL_SCALE = 3000.0
-SEGMENTS = 28               # 게이지 세그먼트 개수
 PREFS_NAME = "overlay.json"
 
-# 아래 패널 — 더블클릭으로 순환한다
-MENU_QSS = (
-    "QMenu{background:#15161f;color:#e8eaf2;border:1px solid #2a2c3a;padding:4px;}"
-    "QMenu::item{padding:5px 18px;}QMenu::item:selected{background:#2f3350;}"
-)
+# contextual content — 화면에는 하나만 보이고 검색/메뉴에서 직접 고른다.
 PANELS = ("sessions", "quota", "rates", "days", "board")  # 첫 항목이 기본 패널
 PANEL_TITLES = {"board": "팀", "days": "일별", "sessions": "세션", "rates": "속도", "quota": "한도"}
-PANEL_ROWS = {"board": 5, "days": 7, "sessions": 10, "rates": 6, "quota": 8}
+PANEL_ROWS = {"board": 5, "days": 6, "sessions": 5, "rates": 5, "quota": 6}
 CHIP_H = 18                 # 한도 칩 한 줄 (자격 있을 때만 높이에 더한다)
 MARK_W = {"board": 16.0, "days": 36.0}  # 등수(1자) vs 날짜(5자)
 Row = Tuple[str, str, int, float, bool]  # (좌측 표식, 이름, 토큰, 비용, 강조)
@@ -84,37 +86,27 @@ Row = Tuple[str, str, int, float, bool]  # (좌측 표식, 이름, 토큰, 비�
 #              누적토큰, ctx점유율, 창크기앎, 서브몫)
 SessionRow = Tuple[str, str, str, str, str, float, str, bool, str, int, float, bool, float]
 WHEEL_LINE = 60.0           # 세션 목록 한 줄을 넘기는 휠 델타 (한 칸=120 → 두 줄)
-# 세션 줄의 칸 배치 — (시작, 끝, 오른쪽정렬, 글자크기). 창 폭 대비 비율이라
-# 배율/폭이 바뀌어도 같이 움직인다. 5칸이라 폭이 빠듯해 넘치는 칸은 접는다.
-# 좁은 모드의 마지막 칸은 **벤더 대신 ctx%** 다 — 벤더는 모델명으로 짐작되지만
-# 컨텍스트가 얼마나 찼는지는 다른 데서 볼 방법이 없다.
-SESSION_COLS = ((0.00, 0.16, False, 7.5), (0.16, 0.52, False, 8.5),
-                (0.52, 0.68, True, 8.0), (0.68, 0.84, True, 7.5),
-                (0.84, 1.00, True, 7.5))
-# 확장 모드는 속도와 누적 토큰을 분리하고, 나머지는 상세에 둔다.
-SESSION_COLS_WIDE = ((0.00, 0.09, False, 7.0), (0.09, 0.31, False, 8.5),
-                     (0.31, 0.47, False, 7.5), (0.47, 0.58, True, 8.0),
-                     (0.58, 0.69, True, 7.5), (0.69, 0.82, True, 7.5),
-                     (0.82, 0.93, False, 7.0), (0.93, 1.00, False, 7.0))
-CELL_PAD = 4.0
-SESSION_HEAD = ("상태", "프로젝트", "메인/s", "누적", "컨텍스트")
-SESSION_HEAD_WIDE = ("상태", "프로젝트", "모델", "메인/s", "누적", "컨텍스트", "시각", "추론")
-DETAIL_H = 44.0
+DETAIL_H = 56.0
 CARD_H = 32.0
 COLHEAD_H = 14              # 칸 이름 한 줄 높이
 CTX_WARN, CTX_HOT = 0.70, 0.90  # 컨텍스트 점유 경고선 (앰버 / 빨강)
 
 # 미니 모드 — 게이지 한 줄만. 회의·녹화 중 화면을 비우려고 쓴다
-MINI_W, MINI_H = 0.62, 30.0
-# 우상단 크기 버튼 — S(미터기만) · M(패널까지) · L(히스토리까지), 그리고 창 닫기
+MINI_W, MINI_H = 0.60, 34.0
+# 크기 단계는 명령 런처와 메뉴에서 고른다. 상시 노출해 계기보다 먼저 보이게 하지 않는다.
 MODES = ("S", "M", "L")
-MODE_BTN = 24.0
-MIN_HIT = 24.0
-HINT = "오늘/누적 · S/M/L · ⋯ 메뉴"
+MODE_BTN = 28.0
+MIN_HIT = 28.0
+HINT = "⌘K 검색 · ↑↓ 이동 · ↵ 열기"
 HINT_SEC = 20.0
 
+# 검색/명령 런처
+PALETTE_W = 420
+PALETTE_ROW_H = 46
+PALETTE_ROWS = 7
+
 # ── 확장(히스토리) 모드 ──
-EXPAND_W = 1.5              # 폭 배수 (340 → 510). 24막대 그래프엔 이만해도 충분하다
+EXPAND_W = 1.45             # 큰 화면은 빈 공간 대신 정보 밀도를 늘린다
 EXPAND_ROWS = 2             # 목록 줄 수 배수
 GRAPH_H = 124               # 그래프 영역 높이 (scale 1.0 기준)
 GRAPH_TOP = 8               # 구분선과 '시간별 사용량' 사이 여백
@@ -124,26 +116,46 @@ RATE_BTN_W = 44.0           # [1시간][4시간][1일][7일]
 EFFORTS = {"minimal": "min", "low": "low", "medium": "med", "high": "high",
            "xhigh": "xhi", "max": "max"}
 
-# 토큰 종류별 색 (요구사항: in/out/cache 를 눈으로 구분)
-KIND_COLORS: Dict[str, str] = {
-    "input": "#3BE06A",        # 초록
-    "output": "#2BD9E5",       # 시안
-    "cache_read": "#6B7280",   # 회색
-    "cache_write": "#FFC53D",  # 앰버
+THEMES: Dict[str, Dict[str, Any]] = {
+    "dark": {
+        "background_primary": "#0A0C11",
+        "background_secondary": "#11141B",
+        "surface_glass": "#171A22",
+        "surface_glass_elevated": "#20242E",
+        "surface_hover": "#FFFFFF",
+        "text_primary": "#F5F7FB",
+        "text_secondary": "#B3BAC8",
+        "text_tertiary": "#8992A5",
+        "tint": "#8CCBFF",
+        "separator": "#FFFFFF",
+        "destructive": "#FF7B88",
+        "success": "#69D58E",
+        "warning": "#F0C56D",
+        "shadow": "#000000",
+        "surface_alpha": 238,
+        "edge_alpha": 24,
+        "hover_alpha": 13,
+    },
+    "light": {
+        "background_primary": "#E7ECF2",
+        "background_secondary": "#DDE4EC",
+        "surface_glass": "#F8FAFD",
+        "surface_glass_elevated": "#FFFFFF",
+        "surface_hover": "#172033",
+        "text_primary": "#18202B",
+        "text_secondary": "#4F5B6D",
+        "text_tertiary": "#5F6B7B",
+        "tint": "#006EBE",
+        "separator": "#172033",
+        "destructive": "#B72D3D",
+        "success": "#247B46",
+        "warning": "#8A5B00",
+        "shadow": "#24344A",
+        "surface_alpha": 240,
+        "edge_alpha": 24,
+        "hover_alpha": 12,
+    },
 }
-BG = "#0D0E13"
-FG = "#E8EAF2"
-DIM = "#8B93A7"
-LINE = "#232634"
-GOLD = "#FFC53D"
-ACCENT = "#2BD9E5"
-STATE_COLORS = {"check": "#FF5F6D", "working": "#3BE06A", "waiting": DIM, "done": "#555B6C"}
-CONTROL_QSS = (
-    "QToolButton{background:transparent;border:0;border-radius:3px;}"
-    "QToolButton:hover{background:rgba(43,217,229,22);}"
-    "QToolButton:focus{border:1px solid #2BD9E5;background:rgba(43,217,229,18);}"
-)
-
 
 # ── 작은 헬퍼 ─────────────────────────────────────────────────────────────
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -256,17 +268,8 @@ def sub_ratio(rec: Any) -> float:
 def ctx_color(ratio: float) -> str:
     """컨텍스트는 차오를수록 위험 신호다 — 압축이 임박했다는 뜻이라 색이 바뀐다."""
     if ratio >= CTX_HOT:
-        return "#FF5F6D"
-    return GOLD if ratio >= CTX_WARN else DIM
-
-
-def seg_color(pos: float) -> str:
-    """세그먼트 위치별 색 — VU 미터처럼 위로 갈수록 뜨거워진다."""
-    if pos < 0.55:
-        return "#3BE06A"
-    if pos < 0.8:
-        return "#FFC53D"
-    return "#FF5F6D"
+        return str(THEMES["dark"]["destructive"])
+    return str(THEMES["dark"]["warning"] if ratio >= CTX_WARN else THEMES["dark"]["text_tertiary"])
 
 
 def visible_pos(pos: Any, screens: List[Tuple[int, int, int, int]], fallback: Tuple[int, int]) -> Tuple[int, int]:
@@ -330,6 +333,35 @@ def _age_caption(ts: Any, now: Optional[float] = None) -> str:
     return f"{sec // 86400}일 전 갱신"
 
 
+def search_score(query: str, *parts: Any) -> int:
+    """짧은 런처 검색 점수. 포함 검색 뒤에 공백 없는 부분수열만 허용한다."""
+    # ponytail: 로컬 세션 수 규모의 선형 검색. 수천 항목이 실측될 때만 인덱스를 둔다.
+    needle = " ".join(query.casefold().split())
+    if not needle:
+        return 1
+    haystack = " ".join(str(part or "").casefold() for part in parts)
+    if haystack.startswith(needle):
+        return 300 - min(100, len(haystack) - len(needle))
+    if needle in haystack:
+        return 220 - min(100, haystack.index(needle))
+    compact_needle, compact_haystack = needle.replace(" ", ""), haystack.replace(" ", "")
+    cursor, gap = -1, 0
+    for char in compact_needle:
+        found = compact_haystack.find(char, cursor + 1)
+        if found < 0:
+            return 0
+        gap += found - cursor - 1
+        cursor = found
+    return max(1, 120 - gap)
+
+
+def _qss_rgba(value: str, alpha: int) -> str:
+    text = str(value or "").lstrip("#")
+    if len(text) != 6:
+        return f"rgba(0,0,0,{alpha})"
+    return f"rgba({int(text[0:2], 16)},{int(text[2:4], 16)},{int(text[4:6], 16)},{alpha})"
+
+
 def _prefs_path() -> Path:
     from .config import DATA_DIR
 
@@ -365,12 +397,82 @@ class MeterWindow(QWidget):
 
     sync_finished = pyqtSignal(str)
 
+    def _resolved_theme(self) -> str:
+        if self.theme_mode in THEMES:
+            return self.theme_mode
+        try:
+            return "light" if QApplication.styleHints().colorScheme() == Qt.ColorScheme.Light else "dark"
+        except Exception:
+            return "dark"
+
+    def _state_color(self, state: str) -> str:
+        return {
+            "check": self.colors["destructive"],
+            "working": self.colors["success"],
+            "waiting": self.colors["text_secondary"],
+            "done": self.colors["text_tertiary"],
+        }.get(state, self.colors["text_tertiary"])
+
+    def _kind_color(self, kind: str) -> str:
+        return {
+            "input": self.colors["success"],
+            "output": self.colors["tint"],
+            "cache_read": self.colors["text_tertiary"],
+            "cache_write": self.colors["warning"],
+        }.get(kind, self.colors["text_secondary"])
+
+    def _ctx_color(self, ratio: float) -> str:
+        if ratio >= CTX_HOT:
+            return self.colors["destructive"]
+        return self.colors["warning"] if ratio >= CTX_WARN else self.colors["text_tertiary"]
+
+    def _control_style(self) -> str:
+        hover = _qss_rgba(self.colors["surface_hover"], self.colors["hover_alpha"])
+        pressed = _qss_rgba(self.colors["surface_hover"], self.colors["hover_alpha"] * 2)
+        focus = _qss_rgba(self.colors["tint"], 18)
+        return (
+            "QToolButton{background:transparent;border:0;border-radius:8px;}"
+            f"QToolButton:hover{{background:{hover};}}"
+            f"QToolButton:pressed{{background:{pressed};}}"
+            f"QToolButton:focus{{border:2px solid {self.colors['tint']};background:{focus};}}"
+        )
+
+    def _input_style(self) -> str:
+        selection = _qss_rgba(self.colors["tint"], 70)
+        return (
+            "QLineEdit{background:transparent;border:0;padding:0;"
+            f"color:{self.colors['text_primary']};"
+            f"placeholder-text-color:{self.colors['text_tertiary']};"
+            f"selection-background-color:{selection};}}"
+        )
+
+    def _menu_style(self) -> str:
+        selected = _qss_rgba(self.colors["tint"], 32)
+        return (
+            f"QMenu{{background:{self.colors['surface_glass_elevated']};"
+            f"color:{self.colors['text_primary']};border:1px solid "
+            f"{_qss_rgba(self.colors['separator'], self.colors['edge_alpha'])};"
+            "border-radius:10px;padding:6px;}"
+            "QMenu::item{padding:7px 20px;border-radius:7px;}"
+            f"QMenu::item:selected{{background:{selected};}}"
+            f"QMenu::item:disabled{{color:{self.colors['text_tertiary']};}}"
+        )
+
+    def _apply_theme(self) -> None:
+        self.colors = dict(THEMES[self._resolved_theme()])
+        style = self._control_style()
+        for button in self._controls.values():
+            button.setStyleSheet(style)
+        if hasattr(self, "_search_field"):
+            self._search_field.setStyleSheet(self._input_style())
+        self.update()
+
     def __init__(self, meter: Any = None, board: Any = None) -> None:
         super().__init__()
         self.meter = meter
 
         # ── 설정 / 사용자 환경설정 ──
-        fps, cfg_scale, cfg_pos = 60, 1.0, [40, 80]
+        fps, cfg_scale, cfg_pos = 30, 1.0, [40, 80]
         self.full_scale = DEFAULT_FULL_SCALE  # 설정을 못 읽어도 미터는 떠야 한다
         config = None
         try:
@@ -399,6 +501,12 @@ class MeterWindow(QWidget):
         self._seen_out: Dict[str, int] = {}     # 세션 키 → 마지막으로 본 누적 출력
 
         prefs = _load_prefs()
+        self.theme_mode = str(prefs.get("theme") or "dark")
+        if self.theme_mode not in ("dark", "light", "system"):
+            self.theme_mode = "dark"
+        self.reduce_transparency = bool(prefs.get("reduce_transparency", False))
+        self.reduce_motion = bool(prefs.get("reduce_motion", False))
+        self.colors = dict(THEMES[self._resolved_theme()])
         self.scale = _clamp(_float(prefs.get("scale"), cfg_scale), 1.0, 2.0)
         self.rows_on = bool(prefs.get("rows", True))
         self.on_top = bool(prefs.get("on_top", True))
@@ -435,6 +543,9 @@ class MeterWindow(QWidget):
         self._feedback = ""
         self._screen_connected = False
         self._quitting = False
+        self.palette_open = False
+        self.palette_index = 0
+        self.palette_results: List[Dict[str, Any]] = []
         pos = prefs.get("pos") if isinstance(prefs.get("pos"), list) else cfg_pos
 
         # ── 창 ──
@@ -443,6 +554,18 @@ class MeterWindow(QWidget):
         self._apply_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._font = (QFont("SF Pro Text") if sys.platform == "darwin" else
+                      QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
+        self._search_field = QLineEdit(self)
+        self._search_field.setFont(self._font)
+        self._search_field.setPlaceholderText("세션 또는 명령 검색")
+        self._search_field.setAccessibleName("세션 또는 명령 검색")
+        self._search_field.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._search_field.setTextMargins(24, 0, 42, 0)
+        self._search_field.setStyleSheet(self._input_style())
+        self._search_field.textChanged.connect(self._refresh_palette)
+        self._search_field.installEventFilter(self)
+        self._search_field.hide()
         size = self._size()
         self.resize(*size)
         home = QApplication.primaryScreen().availableGeometry()
@@ -461,17 +584,22 @@ class MeterWindow(QWidget):
         self.peak = 0.0           # 피크 홀드 마커
         self.pulse = 0.0          # 유입 순간 번쩍임 0~1
 
-        self._font = QFont()
-        self._font.setStyleHint(QFont.StyleHint.Monospace)
         self._drag: Optional["QPoint"] = None
 
         self._refresh_state()
         self._setup_tray()
         self.sync_finished.connect(self._sync_done)
+        try:
+            QApplication.styleHints().colorSchemeChanged.connect(
+                lambda _scheme: self._apply_theme() if self.theme_mode == "system" else None
+            )
+        except Exception:
+            pass
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(max(8, int(1000 / max(1, fps))))
+        self._active_interval = max(16, int(1000 / max(1, fps)))
+        self._timer.start(self._active_interval)
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._refresh_state)
         self._poll.start(200)
@@ -493,28 +621,28 @@ class MeterWindow(QWidget):
         return self.expanded and self.panel in ("rates", "days")
 
     def _cap(self, panel: str) -> int:
-        """패널이 담는 줄 수. 확장 모드는 폭도 높이도 남으니 배로 보여준다.
-
-        세션만은 접든 펴든 10줄로 고정한다 — 그 아래는 휠로 굴려 본다.
-        전체 개수는 머리글의 '세션 N개 기록' 이 알려준다.
-        """
+        """기본은 한눈에 읽을 만큼만, 큰 화면은 같은 목록의 밀도만 높인다."""
         n = PANEL_ROWS.get(panel, 5)
-        return n if (not self.expanded or panel == "sessions") else n * EXPAND_ROWS
+        return n if not self.expanded else n * EXPAND_ROWS
 
     def _size(self) -> Tuple[int, int]:
+        if self.palette_open:
+            rows = max(3, min(PALETTE_ROWS, len(self.palette_results)))
+            w = max(BASE_W, PALETTE_W)
+            h = PAD * 2 + HEADER_H + SPACE_2 + SEARCH_H + SPACE_2 + rows * PALETTE_ROW_H + FOOT_H
+            return int(w * self.scale), int(h * self.scale)
         if self.mini:
             return int(BASE_W * MINI_W * self.scale), int(MINI_H * self.scale)
         rows = self._row_count()
-        if self.panel == "sessions":
-            extra = FILTER_H + COLHEAD_H
-        elif self.panel == "rates":
+        if self.panel == "rates":
             extra = COLHEAD_H + (0 if self.expanded else BTN_H)
         elif self.panel == "quota":
             extra = COLHEAD_H
         else:
             extra = 0
         head = HEAD_H + extra
-        h = PAD * 2 + METER_H + self._chip_h() + (head + rows * ROW_H + 8 if rows else 0) + FOOT_H
+        h = (PAD * 2 + CHROME_H + METER_H + self._chip_h()
+             + (head + rows * ROW_H + SPACE_2 if rows else 0) + FOOT_H)
         w = BASE_W * (EXPAND_W if self.expanded else 1.0)
         if self._shows_graph():
             h += GRAPH_H
@@ -574,6 +702,9 @@ class MeterWindow(QWidget):
                 "end_card": self.end_card,
                 "mini": self.mini,
                 "hint_seen": self.hint_seen,
+                "theme": self.theme_mode,
+                "reduce_transparency": self.reduce_transparency,
+                "reduce_motion": self.reduce_motion,
             }
         )
 
@@ -593,6 +724,8 @@ class MeterWindow(QWidget):
         self._track_ended()
         self._track_rates()
         self._rebuild_rows()
+        if self.palette_open:
+            self._refresh_palette()
         self._update_accessibility()
         self._update_tray()
 
@@ -821,6 +954,125 @@ class MeterWindow(QWidget):
         ]
         return rows, rate_summary(data)
 
+    # ── 검색 / 명령 런처 ────────────────────────────────────────────────
+    def _palette_catalog(self) -> List[Dict[str, Any]]:
+        panel_copy = {
+            "sessions": ("세션", "현재 에이전트 상태와 컨텍스트"),
+            "rates": ("속도", "모델별 출력 처리량"),
+            "days": ("사용량 히스토리", "오늘 · 7일 · 30일"),
+            "quota": ("플랜 한도", "Claude · Codex · Grok"),
+            "board": ("팀", "공유 상태와 사용량"),
+        }
+        items: List[Dict[str, Any]] = []
+        for index, panel in enumerate(self._visible_panels()):
+            title, subtitle = panel_copy[panel]
+            items.append({
+                "target": f"panel:{panel}", "title": title, "subtitle": subtitle,
+                "tag": "현재" if panel == self.panel else "보기", "order": 20 + index,
+                "keywords": f"{panel} {PANEL_TITLES[panel]}",
+            })
+        items.extend([
+            {"target": "filter:check", "title": "확인 필요한 세션", "subtitle": "응답을 기다리는 작업만",
+             "tag": "필터", "order": 12, "keywords": "attention check 확인"},
+            {"target": "filter:live", "title": "라이브 세션", "subtitle": "확인 · 작업 · 대기",
+             "tag": "필터", "order": 13, "keywords": "active live 라이브"},
+            {"target": "filter:all", "title": "모든 세션", "subtitle": "종료된 기록 포함",
+             "tag": "필터", "order": 14, "keywords": "all history 전체"},
+            {"target": "mode:S", "title": "미터만 보기", "subtitle": "콘텐츠 목록 접기",
+             "tag": "보기", "order": 40, "keywords": "small compact s"},
+            {"target": "mode:M", "title": "기본 보기", "subtitle": "미터와 핵심 목록",
+             "tag": "보기", "order": 41, "keywords": "medium default m"},
+            {"target": "mode:L", "title": "상세 보기", "subtitle": "넓은 히스토리와 더 많은 결과",
+             "tag": "보기", "order": 42, "keywords": "large detail l"},
+            {"target": "command:scope", "title": "누적 보기" if self.scope == "today" else "오늘 보기",
+             "subtitle": "사용량 범위 전환", "tag": "명령", "order": 43,
+             "keywords": "today total scope 오늘 누적"},
+            {"target": "command:settings", "title": "빠른 설정", "subtitle": "모양 · 동작 · 창 크기",
+             "tag": "⌘,", "order": 44, "keywords": "settings preferences 설정"},
+        ])
+        for rec in sorted(session_views(self.status), key=session_sort_key):
+            key = str(rec.get("key") or "")
+            attention = str(rec.get("attention") or "done")
+            project = project_label(rec.get("project") or rec.get("service") or "(unknown)", rec.get("cwd"))
+            model = short_model(rec.get("model"))
+            context = ctx_status_caption(ctx_ratio(rec), _float(rec.get("ctx_win")) > 0)
+            subtitle = " · ".join(part for part in (
+                ATTENTION_LABELS.get(attention, attention), model, f"컨텍스트 {context}",
+            ) if part)
+            order = {"check": 0, "working": 2, "waiting": 4, "done": 60}.get(attention, 50)
+            items.append({
+                "target": f"session:{key}", "title": project, "subtitle": subtitle,
+                "tag": "세션", "order": order,
+                "keywords": f"{key} {rec.get('vendor') or ''} {rec.get('service') or ''}",
+            })
+        return items
+
+    def _refresh_palette(self, _text: str = "") -> None:
+        if not self.palette_open:
+            return
+        query = self._search_field.text().strip()
+        ranked: List[Tuple[int, int, str, Dict[str, Any]]] = []
+        for item in self._palette_catalog():
+            score = search_score(query, item["title"], item["subtitle"], item["keywords"])
+            if score:
+                ranked.append((-score, int(item["order"]), str(item["title"]), item))
+        ranked.sort(key=lambda row: row[:3])
+        self.palette_results = [row[3] for row in ranked[:PALETTE_ROWS]]
+        self.palette_index = max(0, min(self.palette_index, len(self.palette_results) - 1))
+        self._resize_to_content()
+        self.update()
+
+    def _open_palette(self) -> None:
+        if self.palette_open:
+            self._search_field.selectAll()
+            self._search_field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            return
+        self.palette_open, self.palette_index = True, 0
+        self._search_field.clear()
+        self._refresh_palette()
+        self._search_field.show()
+        self._resize_to_content()
+        self.update()
+        self._search_field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def _close_palette(self) -> None:
+        if not self.palette_open:
+            return
+        self.palette_open = False
+        self._search_field.hide()
+        self._search_field.clear()
+        self.palette_results = []
+        self._resize_to_content()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.update()
+
+    def _move_palette(self, step: int) -> None:
+        if not self.palette_results:
+            return
+        self.palette_index = (self.palette_index + step) % len(self.palette_results)
+        self.update()
+
+    def _activate_palette(self) -> bool:
+        if not 0 <= self.palette_index < len(self.palette_results):
+            return False
+        target = str(self.palette_results[self.palette_index]["target"])
+        self._close_palette()
+        return self._activate_target(target)
+
+    def _open_session(self, key: str) -> None:
+        views = sorted(filter_sessions(session_views(self.status), "all"), key=session_sort_key)
+        index = next((i for i, rec in enumerate(views) if str(rec.get("key")) == key), 0)
+        self.panel, self.session_filter, self.rows_on = "sessions", "all", True
+        self.scroll = max(0, index - self._cap("sessions") // 2)
+        self.open_key = key
+        rec = next((rec for rec in views if str(rec.get("key")) == key), None)
+        project = project_label(rec.get("project"), rec.get("cwd")) if rec else ""
+        self.focus = ("project", project) if project else None
+        self._rebuild_rows()
+        self._resize_to_content()
+        self._store_prefs()
+        self.update()
+
     # ── 프레임 ───────────────────────────────────────────────────────────
     def _tick(self) -> None:
         now_m = time.monotonic()
@@ -834,6 +1086,10 @@ class MeterWindow(QWidget):
             self._resize_to_content()
         self._advance(dt)
         self.update()
+        active = bool(self.rate > 0.01 or self.gauge > 0.004 or self.pulse > 0.0 or self.card)
+        interval = self._active_interval if active and not self.reduce_motion else 250
+        if self._timer.interval() != interval:
+            self._timer.setInterval(interval)
 
     def _end_hint(self) -> None:
         if not self.hint_until:
@@ -856,6 +1112,9 @@ class MeterWindow(QWidget):
                 self.rates[key] = value
 
         target = gauge_target(self.rate, self.full_scale)
+        if self.reduce_motion:
+            self.gauge, self.peak, self.pulse = target, 0.0, 0.0
+            return
         # 프레임이 오래 밀려도 애니메이션이 튀지 않게 보간 dt 만 묶는다 (감쇠는 실제 dt)
         step = min(dt, 0.05)
         # 차오르는 건 빠르게, 내려가는 건 느리게 — 관성이 있어야 계기판처럼 읽힌다
@@ -872,13 +1131,14 @@ class MeterWindow(QWidget):
         self._painter.setFont(self._font)
 
     def _text(self, x: float, y: float, w: float, h: float, s: str,
-              color: str = FG, right: bool = False, alpha: int = 255) -> None:
-        self._painter.setPen(_c(color, alpha))
+              color: Optional[str] = None, right: bool = False, alpha: int = 255) -> None:
+        self._painter.setPen(_c(color or self.colors["text_primary"], alpha))
         align = Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft
         self._painter.drawText(QRectF(x, y, w, h), align | Qt.AlignmentFlag.AlignVCenter, s)
 
     def _control_caption(self, name: str) -> str:
         labels = {
+            "search": "세션 또는 명령 검색 · Command K",
             "scope": "오늘과 누적 전환",
             "attention": "확인이 필요한 세션 보기",
             "menu": "더 보기 메뉴",
@@ -891,6 +1151,12 @@ class MeterWindow(QWidget):
         if name in labels:
             return labels[name]
         kind, _, value = name.partition(":")
+        if kind == "palette":
+            try:
+                item = self.palette_results[int(value)]
+                return f"{item['title']} · {item['subtitle']}"
+            except (IndexError, TypeError, ValueError):
+                return "검색 결과"
         if kind == "mode":
             return {"S": "작은 미터", "M": "기본 미터와 패널", "L": "넓은 상세 보기"}.get(value, value)
         if kind == "panel":
@@ -931,7 +1197,7 @@ class MeterWindow(QWidget):
             button = self._controls.get(name)
             if button is None:
                 button = QToolButton(self)
-                button.setStyleSheet(CONTROL_QSS)
+                button.setStyleSheet(self._control_style())
                 button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
                 button.installEventFilter(self)
@@ -987,6 +1253,28 @@ class MeterWindow(QWidget):
 
     def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.KeyPress:
+            modifiers = event.modifiers()
+            command = bool(modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                        Qt.KeyboardModifier.MetaModifier))
+            if command and event.key() == Qt.Key.Key_K:
+                self._open_palette()
+                return True
+            if command and event.key() == Qt.Key.Key_Comma:
+                self._popup_menu()
+                return True
+            if watched is self._search_field:
+                if event.key() == Qt.Key.Key_Up:
+                    self._move_palette(-1)
+                    return True
+                if event.key() == Qt.Key.Key_Down:
+                    self._move_palette(1)
+                    return True
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self._activate_palette()
+                    return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self._close_palette()
+                    return True
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Up):
                 self._move_control_focus(watched, -1)
                 return True
@@ -1010,13 +1298,34 @@ class MeterWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         try:
             s = self.scale
-            p.fillRect(QRectF(0, 0, self.width(), self.height()), _c(BG, 236))
-            p.fillRect(QRectF(0, 0, self.width(), 1.0 * s), _c("#FFFFFF", 22))
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            p.fillRect(QRectF(0, 0, self.width(), self.height()), QColor(0, 0, 0, 0))
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            # ponytail: 단일 alpha surface. 프로파일링으로 여유가 확인될 때만 native blur를 붙인다.
+            surface = QRectF(1.0 * s, 1.0 * s, self.width() - 2.0 * s, self.height() - 2.0 * s)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(_c(self.colors["shadow"], 34 if not self.reduce_transparency else 20))
+            p.drawRoundedRect(surface.translated(0, 1.5 * s), RADIUS_XL * s, RADIUS_XL * s)
+            alpha = 255 if self.reduce_transparency else int(self.colors["surface_alpha"])
+            p.setBrush(_c(self.colors["surface_glass"], alpha))
+            p.drawRoundedRect(surface, RADIUS_XL * s, RADIUS_XL * s)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(_c(self.colors["separator"], int(self.colors["edge_alpha"])))
+            p.drawRoundedRect(surface, RADIUS_XL * s, RADIUS_XL * s)
             self._hit = {}
-            if self.mini:
+            if self.palette_open:
+                y = self._draw_header(PAD * s, PAD * s, self.width() - PAD * 2 * s)
+                y = self._draw_search(PAD * s, y, self.width() - PAD * 2 * s)
+                self._draw_palette(PAD * s, y, self.width() - PAD * 2 * s)
+                self._f(7.5)
+                self._text(PAD * s, self.height() - FOOT_H * s, self.width() - PAD * 2 * s,
+                           FOOT_H * s, "↑↓ 이동 · ↵ 열기 · esc 닫기", self.colors["text_tertiary"])
+            elif self.mini:
                 self._draw_mini(6 * s, 0, self.width() - 12 * s)
             else:
-                y = self._draw_meter(PAD * s, PAD * s, self.width() - PAD * 2 * s)
+                y = self._draw_header(PAD * s, PAD * s, self.width() - PAD * 2 * s)
+                y = self._draw_search(PAD * s, y, self.width() - PAD * 2 * s)
+                y = self._draw_meter(PAD * s, y, self.width() - PAD * 2 * s)
                 y = self._draw_chips(PAD * s, y, self.width() - PAD * 2 * s)
                 if self.card:
                     y = self._draw_card(PAD * s, y, self.width() - PAD * 2 * s)
@@ -1028,7 +1337,8 @@ class MeterWindow(QWidget):
                 hint = self.hint_until > 0.0
                 sick = self.state_error or health_note(self.status, time.time())
                 foot = HINT if hint else (sick or self._feedback or self.note)
-                color = GOLD if hint else (STATE_COLORS["check"] if sick else DIM)
+                color = (self.colors["warning"] if hint else
+                         (self.colors["destructive"] if sick else self.colors["text_tertiary"]))
                 self._text(PAD * s, self.height() - FOOT_H * s, self.width() - PAD * 2 * s,
                            FOOT_H * s, foot, color)
         finally:
@@ -1036,78 +1346,147 @@ class MeterWindow(QWidget):
             self._painter = None  # type: ignore[assignment]
         self._sync_controls()
 
+    def _draw_header(self, x: float, y: float, w: float) -> float:
+        """브랜드와 전역 조작만 둔다. 콘텐츠 탐색은 바로 아래 검색이 맡는다."""
+        s, p = self.scale, self._painter
+        counts = self._counts()
+        dot = self.colors["destructive"] if counts["check"] else (
+            self.colors["success"] if counts["working"] else self.colors["text_tertiary"]
+        )
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_c(dot))
+        p.drawEllipse(QRectF(x, y + 10 * s, 7 * s, 7 * s))
+        self._f(10.5, True)
+        self._text(x + 13 * s, y, w * 0.42, HEADER_H * s, "TokenMeter")
+
+        close_w, menu_w, scope_w = MODE_BTN * s, MODE_BTN * s, 48 * s
+        right = x + w
+        self._f(8, True)
+        label = "오늘" if self.scope == "today" else "누적"
+        self._text(right - close_w - menu_w - scope_w, y, scope_w, HEADER_H * s,
+                   label, self.colors["tint"], right=True)
+        self._hit["scope"] = (right - close_w - menu_w - scope_w, y, scope_w, HEADER_H * s)
+        self._f(11, True)
+        self._text(right - close_w - menu_w, y, menu_w, HEADER_H * s, "⋯",
+                   self.colors["text_tertiary"], right=True)
+        self._hit["menu"] = (right - close_w - menu_w, y, menu_w, HEADER_H * s)
+        self._f(10, True)
+        self._text(right - close_w, y, close_w, HEADER_H * s, "×",
+                   self.colors["text_tertiary"], right=True)
+        self._hit["close"] = (right - close_w, y, close_w, HEADER_H * s)
+        return y + HEADER_H * s + SPACE_2 * s
+
+    def _draw_search(self, x: float, y: float, w: float) -> float:
+        s, p = self.scale, self._painter
+        rect = QRectF(x, y, w, SEARCH_H * s)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_c(self.colors["surface_hover"], 18 if self.palette_open else 10))
+        p.drawRoundedRect(rect, RADIUS_MD * s, RADIUS_MD * s)
+        if self.palette_open:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(_c(self.colors["tint"], 110))
+            p.drawRoundedRect(rect, RADIUS_MD * s, RADIUS_MD * s)
+            font = QFont(self._font)
+            font.setPointSizeF(max(9.0, 9.5 * s))
+            self._search_field.setFont(font)
+            self._search_field.setTextMargins(int(12 * s), 0, int(44 * s), 0)
+            self._search_field.setGeometry(
+                int(x + 1 * s), int(y), max(1, int(w - 2 * s)), max(1, int(SEARCH_H * s)),
+            )
+            self._search_field.show()
+            self._f(8)
+            self._text(x + w - 40 * s, y, 28 * s, SEARCH_H * s, "esc",
+                       self.colors["text_tertiary"], right=True)
+        else:
+            self._f(9)
+            self._text(x + 14 * s, y, w - 76 * s, SEARCH_H * s,
+                       "세션 또는 명령 검색", self.colors["text_secondary"])
+            self._f(7.5, True)
+            self._text(x, y, w - 13 * s, SEARCH_H * s, "⌘K",
+                       self.colors["text_tertiary"], right=True)
+            self._hit["search"] = (x, y, w, SEARCH_H * s)
+        return y + SEARCH_H * s + SPACE_3 * s
+
+    def _draw_palette(self, x: float, y: float, w: float) -> float:
+        s, p = self.scale, self._painter
+        if not self.palette_results:
+            self._f(9)
+            self._text(x, y, w, PALETTE_ROW_H * 2 * s, "일치하는 세션이나 명령이 없습니다",
+                       self.colors["text_secondary"])
+            return y + PALETTE_ROW_H * 3 * s
+        for i, item in enumerate(self.palette_results):
+            ry, h = y + i * PALETTE_ROW_H * s, (PALETTE_ROW_H - 3) * s
+            selected = i == self.palette_index
+            if selected:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(_c(self.colors["tint"], 24))
+                p.drawRoundedRect(QRectF(x, ry, w, h), RADIUS_SM * s, RADIUS_SM * s)
+                p.setBrush(_c(self.colors["tint"], 180))
+                p.drawRoundedRect(QRectF(x, ry + 9 * s, 2 * s, h - 18 * s), 1 * s, 1 * s)
+            self._f(9.5, True)
+            self._text(x + 14 * s, ry + 3 * s, w - 92 * s, 20 * s, str(item["title"]))
+            self._f(7.5)
+            self._text(x + 14 * s, ry + 21 * s, w - 92 * s, 18 * s, str(item["subtitle"]),
+                       self.colors["text_secondary"])
+            self._f(7.5, True)
+            self._text(x, ry, w - 14 * s, h, str(item["tag"]),
+                       self.colors["tint"] if selected else self.colors["text_tertiary"], right=True)
+            self._hit[f"palette:{i}"] = (x, ry, w, h)
+        return y + len(self.palette_results) * PALETTE_ROW_H * s
+
     def _draw_meter(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
         y0 = y
         tot = self._scoped()
-
-        # 1행: 제목 + 오늘/누적 + 명시적인 크기/메뉴/숨김 버튼
         counts = self._counts()
-        self._f(7.5, True)
-        self._text(x, y, w, MODE_BTN * s, "TOKEN METER", DIM)
-        bar = MODE_BTN * s * (len(MODES) + 2)  # [S][M][L][⋯][×]
-        label = "오늘" if self.scope == "today" else "누적"
-        lw = 40 * s
-        self._text(x, y, w - bar - 4 * s, MODE_BTN * s, label, ACCENT, right=True)
-        self._hit["scope"] = (x + w - bar - lw, y, lw, MODE_BTN * s)
-        self._draw_modes(x + w - bar, y)
-
-        # 2행: 확인이 있으면 행동을 먼저, 없으면 전체 출력 처리량을 먼저 보여준다.
-        y = y0 + 26 * s
         rate = f"{self.rate:.1f}" if 0 < self.rate < 10 else _fmt(self.rate)
         money = cost_caption(self._approx(), tot.get("cost_usd"))
+        self._f(24, True)
+        fm = QFontMetricsF(self._font)
+        self._text(x, y0, w * 0.42, 31 * s, rate,
+                   self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"])
+        rate_w = fm.horizontalAdvance(rate) + 10 * s
+        self._f(9, True)
+        self._text(x + rate_w, y0 + 3 * s, w * 0.38, 28 * s, "전체 출력 tok/s",
+                   self.colors["text_secondary"])
+        self._f(10.5, True)
+        self._text(x, y0, w, 22 * s, money, self.colors["text_primary"], right=True)
+        self._f(7)
+        self._text(x, y0 + 19 * s, w, 14 * s, "API 환산", self.colors["text_tertiary"], right=True)
+
+        status_y = y0 + 31 * s
+        self._f(8, counts["check"] > 0)
         if counts["check"]:
-            side = min(150 * s, w * 0.46)
-            self._painter.fillRect(QRectF(x, y, 72 * s, 24 * s), _c(STATE_COLORS["check"], 30))
-            self._f(12, True)
-            self._text(x + 6 * s, y, 68 * s, 24 * s, f"확인 {counts['check']}", STATE_COLORS["check"])
             project = self._check_project()
-            self._f(8.5, True)
-            self._text(x + 78 * s, y, max(0.0, w - side - 82 * s), 24 * s,
-                       project or "세션 목록에서 확인", FG)
-            self._hit["attention"] = (x, y, max(96 * s, w - side - 4 * s), 24 * s)
-            self._f(7.5, True)
-            self._text(x, y, w, 12 * s, f"전체 출력 {rate} tok/s", DIM, right=True)
-            self._text(x, y + 12 * s, w, 12 * s, money, DIM, right=True)
+            status = f"확인 필요 {counts['check']}" + (f" · {project}" if project else "")
+            color = self.colors["destructive"]
+            self._hit["attention"] = (x, status_y, w * 0.65, 18 * s)
         else:
-            self._f(19, True)
-            self._text(x, y, w, 26 * s, rate, FG if self.rate > 0 else DIM)
-            self._f(9, True)
-            rate_w = min(w * 0.48, 13 * s * (len(rate) + 1))
-            self._text(x + rate_w, y, w - rate_w, 26 * s, "전체 출력 tok/s", DIM)
-            self._f(10, True)
-            self._text(x, y, w, 26 * s, money, DIM, right=True)
+            status = f"작업 {counts['working']} · 대기 {counts['waiting']}"
+            color = self.colors["text_secondary"]
+        self._text(x, status_y, w * 0.68, 18 * s, status, color)
 
-        # 3행: 세그먼트 게이지
-        y = y0 + 55 * s
-        gw = w / SEGMENTS
-        bar_h = 9 * s
-        lit = self.gauge * SEGMENTS
-        for i in range(SEGMENTS):
-            pos = i / (SEGMENTS - 1.0)
-            on = i < lit
-            col = _c(seg_color(pos), 255 if on else 26)
-            if on and i >= lit - 1.0:  # 선두 세그먼트는 유입 순간 번쩍인다
-                col = _c("#FFFFFF", int(120 + 135 * self.pulse))
-            p.fillRect(QRectF(x + i * gw, y, gw - 1.6 * s, bar_h), col)
-        if self.peak > 0.01:  # 피크 홀드 — 방금 얼마나 빨랐는지 잔상으로 남긴다
-            px = x + _clamp(self.peak, 0.0, 1.0) * w - 1.5 * s
-            p.fillRect(QRectF(px, y - 2 * s, 1.6 * s, bar_h + 4 * s), _c(FG, 150))
+        gauge_y, gauge_h = y0 + 50 * s, 5 * s
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_c(self.colors["surface_hover"], 15))
+        p.drawRoundedRect(QRectF(x, gauge_y, w, gauge_h), gauge_h / 2, gauge_h / 2)
+        fill = max(0.0, w * _clamp(self.gauge, 0.0, 1.0))
+        if fill > 0:
+            p.setBrush(_c(self.colors["tint"], 220))
+            p.drawRoundedRect(QRectF(x, gauge_y, max(gauge_h, fill), gauge_h),
+                              gauge_h / 2, gauge_h / 2)
 
-        # 4행: 기호 대신 이름을 써서 토큰 종류를 바로 읽게 한다.
-        y = y0 + 70 * s
-        self._f(7.5, True)
+        y = y0 + 59 * s
+        self._f(7.5)
         cache = _int(tot.get("cache_read")) + _int(tot.get("cache_write"))
-        saved = _float(tot.get("cache_saved_usd"))
-        cw = w / 4.0
+        cw = w / 3.0
         for i, (mark, val, kind) in enumerate((
             ("입력", _fmt(tot.get("input_tokens")), "input"),
             ("출력", _fmt(tot.get("output_tokens")), "output"),
             ("캐시", _fmt(cache), "cache_write"),
-            ("절감", _money_short(saved), "input"),
         )):
-            self._text(x + cw * i, y, cw - 3 * s, 15 * s, f"{mark} {val}",
-                       KIND_COLORS[kind] if i < 3 else DIM)
+            self._text(x + cw * i, y, cw - 3 * s, 17 * s, f"{mark} {val}",
+                       self._kind_color(kind), right=i > 0)
 
         return y0 + METER_H * s
 
@@ -1119,68 +1498,49 @@ class MeterWindow(QWidget):
         cw = w / len(marks)
         self._f(7.5, True)
         for i, (text, status) in enumerate(marks):
-            color = STATE_COLORS["check"] if status == "exhausted" else (
-                GOLD if status in ("warn", "stale") else DIM
+            color = self.colors["destructive"] if status == "exhausted" else (
+                self.colors["warning"] if status in ("warn", "stale") else self.colors["text_tertiary"]
             )
             self._text(x + i * cw, y, cw, CHIP_H * s, text, color)
             self._hit[f"chip:{i}"] = (x + i * cw, y, cw, CHIP_H * s)
         return y + CHIP_H * s
 
-    def _draw_modes(self, x: float, y: float) -> None:
-        """[S][M][L][⋯][×] — 크기, 전체 메뉴, 오버레이 숨김."""
-        s, p = self.scale, self._painter
-        bw, h, cur = MODE_BTN * s, MODE_BTN * s, self._mode()
-        self._f(7.5, True)
-        for i, name in enumerate(MODES):
-            bx = x + i * bw
-            on = name == cur
-            p.fillRect(QRectF(bx, y, bw - 2 * s, h), _c(ACCENT if on else FG, 30 if on else 12))
-            self._text(bx + 4.5 * s, y, bw, h, name, ACCENT if on else DIM)
-            self._hit[f"mode:{name}"] = (bx, y, bw, h)
-        bx = x + len(MODES) * bw
-        self._f(10, True)
-        self._text(bx + 3 * s, y, bw, h, "⋯", DIM)
-        self._hit["menu"] = (bx, y, bw, h)
-        bx += bw
-        self._f(9, True)
-        self._text(bx + 3.5 * s, y, bw, h, "×", DIM)
-        self._hit["close"] = (bx, y, bw, h)
-
     def _draw_mini(self, x: float, y: float, w: float) -> None:
-        """미니 모드 — 확인 배지 · 속도 · 게이지. 곁눈질에 필요한 최소치만 남긴다."""
+        """미니 모드 — 상태 · 속도 · 한 줄 게이지만 남긴다."""
         s, p = self.scale, self._painter
         h = float(self.height())
         tot = self._scoped()
         checks = self._counts().get("check", 0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_c(self.colors["destructive"] if checks else self.colors["success"]))
+        p.drawEllipse(QRectF(x + 4 * s, (h - 7 * s) / 2, 7 * s, 7 * s))
         if checks:
-            pulse = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(self.t * 4.0))
             badge = f"확인 {checks}"
             self._f(8.5, True)
-            self._text(x, y, 52 * s, h, badge, STATE_COLORS["check"], alpha=int(140 + 115 * pulse))
-            gx0 = 56 * s
+            self._text(x + 16 * s, y, 52 * s, h, badge, self.colors["destructive"])
+            gx0 = 70 * s
         else:
             rate = f"{self.rate:.1f}" if 0 < self.rate < 10 else _fmt(self.rate)
             self._f(9, True)
-            self._text(x, y, 46 * s, h, f"{rate}/s", FG if self.rate > 0 else DIM)
-            gx0 = 50 * s
+            self._text(x + 16 * s, y, 48 * s, h, f"{rate}/s",
+                       self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"])
+            gx0 = 66 * s
         self._f(8.5, True)
         money = money_caption(self._approx(), tot.get("cost_usd"))
-        self._text(x, y, w - MODE_BTN * s, h, money, DIM, right=True)
+        self._text(x, y, w - MODE_BTN * s, h, money, self.colors["text_secondary"], right=True)
         self._f(10, True)
         menu_x = x + w - MODE_BTN * s
-        self._text(menu_x, y, MODE_BTN * s, h, "⋯", DIM, right=True)
+        self._text(menu_x, y, MODE_BTN * s, h, "⋯", self.colors["text_tertiary"], right=True)
         self._hit["menu"] = (menu_x, y, MODE_BTN * s, h)
 
-        segs = SEGMENTS // 2
         gx, gw = x + gx0, max(10.0, w - gx0 - 90 * s)
-        bar_h, by = 6 * s, y + (h - 6 * s) / 2.0
-        lit = self.gauge * segs
-        for i in range(segs):
-            on = i < lit
-            col = _c(seg_color(i / (segs - 1.0)), 255 if on else 26)
-            if on and i >= lit - 1.0:
-                col = _c("#FFFFFF", int(120 + 135 * self.pulse))
-            p.fillRect(QRectF(gx + i * gw / segs, by, gw / segs - 1.6 * s, bar_h), col)
+        bar_h, by = 4 * s, y + (h - 4 * s) / 2.0
+        p.setBrush(_c(self.colors["surface_hover"], 16))
+        p.drawRoundedRect(QRectF(gx, by, gw, bar_h), bar_h / 2, bar_h / 2)
+        fill = gw * _clamp(self.gauge, 0.0, 1.0)
+        if fill > 0:
+            p.setBrush(_c(self.colors["tint"], 220))
+            p.drawRoundedRect(QRectF(gx, by, max(bar_h, fill), bar_h), bar_h / 2, bar_h / 2)
 
     def _draw_card(self, x: float, y: float, w: float) -> float:
         """세션이 막 끝났을 때 한 줄. 클릭하면 사라진다."""
@@ -1188,9 +1548,9 @@ class MeterWindow(QWidget):
             return y
         s, p = self.scale, self._painter
         h = (CARD_H - 6) * s
-        p.fillRect(QRectF(x, y, w, h), _c(GOLD, 28))
+        p.fillRect(QRectF(x, y, w, h), _c(self.colors["warning"], 24))
         self._f(8, True)
-        self._text(x + 6 * s, y, w - 12 * s, h, self.card[1], GOLD)
+        self._text(x + 6 * s, y, w - 12 * s, h, self.card[1], self.colors["warning"])
         self._hit["card"] = (x, y, w, h)
         return y + CARD_H * s
 
@@ -1205,7 +1565,7 @@ class MeterWindow(QWidget):
 
     def _draw_graph(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
-        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(LINE))
+        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(self.colors["separator"], 22))
         y += GRAPH_TOP * s
         if self.panel == "rates":
             return self._draw_rate_graph(x, y, w)
@@ -1217,12 +1577,13 @@ class MeterWindow(QWidget):
         kind, value = self.focus or ("", "")
         title = {"project": f"‹ 전체 · {value}", "day": f"‹ 전체 · {value}"}.get(kind) \
             or "시간별 API 환산 비용 · USD"
-        self._text(x, y, w * 0.5, HEAD_H * s, title, ACCENT if kind else DIM)
+        self._text(x, y, w * 0.5, HEAD_H * s, title,
+                   self.colors["tint"] if kind else self.colors["text_tertiary"])
         if kind:
             self._hit["back"] = (x, y, w * 0.5, HEAD_H * s)
         self._f(7.5)
         self._text(x + w * 0.5, y, w * 0.5 - BTN_W * 3 * s - 6 * s, HEAD_H * s,
-                   summary(data), DIM, right=True)
+                   summary(data), self.colors["text_tertiary"], right=True)
         self._draw_spans(x + w - BTN_W * 3 * s, y, disabled=kind == "day")
         y += HEAD_H * s + 3 * s
 
@@ -1231,21 +1592,22 @@ class MeterWindow(QWidget):
         if data.peak <= 0:
             self._f(8)
             self._text(x, y, w, bh, "아직 쌓인 시간이 없습니다 — 한 시간이 지나면 그려집니다",
-                       DIM, alpha=150)
+                       self.colors["text_tertiary"], alpha=150)
             return y + bh + 11 * s
         bw = w / max(1, len(data.bars))
         tallest = max(range(len(data.bars)), key=lambda i: data.bars[i].total)
         for i, bar in enumerate(data.bars):
             bx = x + i * bw
             if bar.total <= 0:  # 빈 칸도 바닥선을 남겨야 축이 이어져 보인다
-                p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s), _c(LINE))
+                p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s),
+                           _c(self.colors["separator"], 22))
                 continue
             part = bh * (bar.total / data.peak)
             cy = y + bh - part
-            p.fillRect(QRectF(bx, cy, bw - GRAPH_GAP * s, part), _c(ACCENT, 190))
+            p.fillRect(QRectF(bx, cy, bw - GRAPH_GAP * s, part), _c(self.colors["tint"], 190))
             if i == tallest:  # 최고점에만 숫자를 붙인다 — 칸마다 쓰면 뭉개진다
                 self._f(7)
-                self._text(bx - bw, cy - 10 * s, bw * 3, 10 * s, _money_short(bar.total), FG)
+                self._text(bx - bw, cy - 10 * s, bw * 3, 10 * s, _money_short(bar.total))
 
         # 축 라벨 — 칸마다 쓰면 뭉개진다. 4칸에 하나씩만.
         y += bh + 1 * s
@@ -1253,43 +1615,49 @@ class MeterWindow(QWidget):
         step = max(1, len(data.bars) // 8)
         for i, bar in enumerate(data.bars):
             if i % step == 0:
-                self._text(x + i * bw, y, bw * 2, 9 * s, bar.label, DIM, alpha=140)
+                self._text(x + i * bw, y, bw * 2, 9 * s, bar.label,
+                           self.colors["text_tertiary"], alpha=140)
         return y + 10 * s
 
     def _draw_rate_graph(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
         data = self._rate_view()
         self._f(7.5, True)
-        self._text(x, y, w * 0.42, HEAD_H * s, "메인 모델 출력 처리량 · tok/s", DIM)
+        self._text(x, y, w * 0.42, HEAD_H * s, "메인 모델 출력 처리량 · tok/s",
+                   self.colors["text_tertiary"])
         self._f(7.0)
-        self._text(x + w * 0.42, y, w * 0.18, HEAD_H * s, rate_summary(data), DIM, right=True)
+        self._text(x + w * 0.42, y, w * 0.18, HEAD_H * s, rate_summary(data),
+                   self.colors["text_tertiary"], right=True)
         self._draw_rate_spans(x + w - RATE_BTN_W * 4 * s, y)
         y += HEAD_H * s + 3 * s
         bh = GRAPH_H * s - GRAPH_TOP * s - HEAD_H * s - 14 * s
         if data.peak <= 0:
             self._f(8)
-            self._text(x, y, w, bh, "작업이 이어지면 속도가 쌓입니다", DIM, alpha=150)
+            self._text(x, y, w, bh, "작업이 이어지면 속도가 쌓입니다",
+                       self.colors["text_tertiary"], alpha=150)
             return y + bh + 11 * s
         bw = w / max(1, len(data.bars))
         tallest = max(range(len(data.bars)), key=lambda i: data.bars[i].rate)
         for i, bar in enumerate(data.bars):
             bx = x + i * bw
             if bar.rate <= 0:
-                p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s), _c(LINE))
+                p.fillRect(QRectF(bx, y + bh - 1.0 * s, bw - GRAPH_GAP * s, 1.0 * s),
+                           _c(self.colors["separator"], 22))
                 continue
             part = bh * (bar.rate / data.peak)
             p.fillRect(QRectF(bx, y + bh - part, bw - GRAPH_GAP * s, part),
-                       _c(KIND_COLORS["output"], 200))
+                       _c(self._kind_color("output"), 200))
             if i == tallest:
                 self._f(7)
                 self._text(bx - bw, y + bh - part - 10 * s, bw * 3, 10 * s,
-                           f"{bar.rate:.0f}", FG)
+                           f"{bar.rate:.0f}")
         y += bh + 1 * s
         self._f(6.5)
         step = max(1, len(data.bars) // 8)
         for i, bar in enumerate(data.bars):
             if i % step == 0:
-                self._text(x + i * bw, y, bw * 2, 9 * s, bar.label, DIM, alpha=140)
+                self._text(x + i * bw, y, bw * 2, 9 * s, bar.label,
+                           self.colors["text_tertiary"], alpha=140)
         return y + 10 * s
 
     def _draw_rate_spans(self, x: float, y: float) -> None:
@@ -1299,9 +1667,10 @@ class MeterWindow(QWidget):
             bx = x + i * RATE_BTN_W * s
             on = name == self.rate_span
             self._painter.fillRect(QRectF(bx, y, RATE_BTN_W * s - 2 * s, BTN_H * s),
-                                   _c(ACCENT if on else FG, 30 if on else 12))
+                                   _c(self.colors["tint"] if on else self.colors["surface_hover"],
+                                      30 if on else 12))
             self._text(bx, y, RATE_BTN_W * s - 2 * s, BTN_H * s, RATE_SPAN_TITLES[name],
-                       ACCENT if on else DIM)
+                       self.colors["tint"] if on else self.colors["text_tertiary"])
             self._hit[f"rate:{name}"] = (bx, y, RATE_BTN_W * s - 2 * s, BTN_H * s)
 
     def _draw_spans(self, x: float, y: float, disabled: bool = False) -> None:
@@ -1312,32 +1681,32 @@ class MeterWindow(QWidget):
             bx = x + i * BTN_W * s
             rect = QRectF(bx, y, BTN_W * s - 2 * s, BTN_H * s)
             on = (not disabled) and name == self.span
-            p.fillRect(rect, _c(ACCENT if on else FG, 30 if on else 12))
+            p.fillRect(rect, _c(self.colors["tint"] if on else self.colors["surface_hover"],
+                                30 if on else 12))
             self._text(bx, y, BTN_W * s - 2 * s, BTN_H * s, SPAN_TITLES[name],
-                       ACCENT if on else DIM, alpha=90 if disabled else 255)
+                       self.colors["tint"] if on else self.colors["text_tertiary"],
+                       alpha=90 if disabled else 255)
             self._hit[f"span:{name}"] = (bx, y, BTN_W * s - 2 * s, BTN_H * s)
 
     def _draw_rows(self, x: float, y: float, w: float) -> float:
-        """세션·한도·속도·일별·팀. 탭이 전환 버튼이다."""
+        """현재 콘텐츠 하나만 설명한다. 다른 콘텐츠는 검색/명령으로 전환한다."""
         s, p = self.scale, self._painter
-        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(LINE))
-        panels = self._visible_panels()
-        tab_w = w / max(1, len(panels))
-        self._f(7.5, True)
-        for i, name in enumerate(panels):
-            bx = x + i * tab_w
-            on = name == self.panel
-            self._text(bx, y, tab_w, HEAD_H * s, PANEL_TITLES[name],
-                       ACCENT if on else DIM)
-            self._hit[f"panel:{name}"] = (bx, y, tab_w, HEAD_H * s)
+        p.fillRect(QRectF(x, y - 4 * s, w, 1.0), _c(self.colors["separator"], 22))
+        session_titles = {"check": "확인 필요한 세션", "live": "라이브 세션", "all": "모든 세션"}
+        title = session_titles.get(self.session_filter, "라이브 세션") \
+            if self.panel == "sessions" else PANEL_TITLES[self.panel]
+        count = (len(filter_sessions(session_views(self.status), self.session_filter))
+                 if self.panel == "sessions" else len(self.rows))
+        self._f(9.5, True)
+        self._text(x, y, w * 0.62, HEAD_H * s, title)
+        self._f(7.5)
+        self._text(x, y, w, HEAD_H * s, f"{count}개", self.colors["text_tertiary"], right=True)
         y += HEAD_H * s
 
         rows = self.rows[:self._row_count()]
         if self.panel == "sessions":
-            y = self._draw_session_filters(x, y, w)
-            y = self._draw_session_head(x, y, w)
             self._draw_session_rows(x, y, w, rows)
-            bottom = y + len(rows) * ROW_H * s + 6 * s
+            bottom = y + max(1, len(rows)) * ROW_H * s + SPACE_2 * s
             if self.open_key:
                 bottom = self._draw_session_detail(x, bottom, w)
             return bottom
@@ -1354,117 +1723,114 @@ class MeterWindow(QWidget):
             h = (ROW_H - 3) * s
             # 비용 비례 막대가 행 배경이 된다 — 숫자를 읽기 전에 격차가 보인다
             p.fillRect(QRectF(x, ry, w * _clamp(cost / top, 0.0, 1.0), h),
-                       _c(ACCENT if hot else FG, 20 if hot else 10))
+                       _c(self.colors["tint"] if hot else self.colors["surface_hover"],
+                          18 if hot else 8))
             self._hit[f"row:{i}"] = (x, ry, w, ROW_H * s)
             if hot:
-                p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(ACCENT))
+                p.fillRect(QRectF(x, ry + 10 * s, 2.0 * s, h - 20 * s), _c(self.colors["tint"]))
             self._f(8, True)
             shown_mark = mark[5:] if self.panel == "days" and len(mark) == 10 else mark
-            self._text(x + 6 * s, ry, mw * s, h, shown_mark, ACCENT if i == 0 else DIM)
+            self._text(x + 8 * s, ry, mw * s, h, shown_mark,
+                       self.colors["tint"] if i == 0 else self.colors["text_tertiary"])
             self._f(8.5, hot)
-            self._text(x + (10 + mw) * s, ry, w * 0.38, h, label, FG if hot else "#C6CCDC")
+            self._text(x + (12 + mw) * s, ry, w * 0.38, h, label,
+                       self.colors["text_primary"] if hot else self.colors["text_secondary"])
             self._f(8)
-            self._text(x, ry, w - 58 * s, h, _fmt(tokens), DIM, right=True)
+            self._text(x, ry, w - 70 * s, h, _fmt(tokens), self.colors["text_tertiary"], right=True)
             self._f(8.5, True)
-            self._text(x, ry, w - 6 * s, h, _money_short(cost),
-                       FG if hot else "#C6CCDC", right=True)
+            self._text(x, ry, w - 8 * s, h, _money_short(cost),
+                       self.colors["text_primary"] if hot else self.colors["text_secondary"], right=True)
         return y + len(rows) * ROW_H * s + 6 * s
-
-    def _draw_session_filters(self, x: float, y: float, w: float) -> float:
-        s = self.scale
-        self._f(7.0, True)
-        fw = 58 * s
-        for i, name in enumerate(SESSION_FILTERS):
-            bx = x + i * fw
-            on = name == self.session_filter
-            self._painter.fillRect(QRectF(bx, y, fw - 3 * s, FILTER_H * s),
-                                   _c(ACCENT if on else FG, 28 if on else 10))
-            self._text(bx, y, fw - 3 * s, FILTER_H * s, SESSION_FILTER_TITLES[name],
-                       ACCENT if on else DIM)
-            self._hit[f"filter:{name}"] = (bx, y, fw - 3 * s, FILTER_H * s)
-        return y + FILTER_H * s
 
     def _draw_rate_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
         s, p = self.scale, self._painter
         if not self.expanded:
             self._draw_rate_spans(x + w - RATE_BTN_W * 4 * s, y)
-            y += COLHEAD_H * s + 2 * s
+            y += BTN_H * s + 2 * s
         self._f(6.5, True)
-        self._text(x, y, w * 0.34, COLHEAD_H * s, "프로바이더", DIM, alpha=125)
-        self._text(x + w * 0.34, y, w * 0.30, COLHEAD_H * s, "메인 모델", DIM, alpha=125)
+        self._text(x, y, w * 0.34, COLHEAD_H * s, "프로바이더", self.colors["text_tertiary"], alpha=145)
+        self._text(x + w * 0.34, y, w * 0.30, COLHEAD_H * s, "메인 모델", self.colors["text_tertiary"], alpha=145)
         self._text(x + w * 0.64, y, w * 0.18 - 4 * s, COLHEAD_H * s,
-                   "누적", DIM, right=True, alpha=125)
+                   "누적", self.colors["text_tertiary"], right=True, alpha=145)
         self._text(x + w * 0.82, y, w * 0.18 - 6 * s, COLHEAD_H * s,
-                   "tok/s", DIM, right=True, alpha=125)
+                   "tok/s", self.colors["text_tertiary"], right=True, alpha=145)
         y += COLHEAD_H * s
         top = max([row[3] for row in rows] or [0.0]) or 1.0
         for i, (vendor, model, tokens, rate, share) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
             p.fillRect(QRectF(x + w * 0.82, ry + h - 2 * s,
-                              w * 0.18 * _clamp(rate / top, 0.0, 1.0), 2 * s), _c(ACCENT))
+                              w * 0.18 * _clamp(rate / top, 0.0, 1.0), 2 * s),
+                       _c(self.colors["tint"]))
             self._f(8, True)
-            self._text(x + 6 * s, ry, w * 0.34, h, vendor, FG)
+            self._text(x + 6 * s, ry, w * 0.34, h, vendor)
             self._f(8)
-            self._text(x + w * 0.34, ry, w * 0.30, h, model, "#C6CCDC")
-            self._text(x + w * 0.64, ry, w * 0.18 - 4 * s, h, _fmt(tokens), DIM, right=True)
+            self._text(x + w * 0.34, ry, w * 0.30, h, model, self.colors["text_secondary"])
+            self._text(x + w * 0.64, ry, w * 0.18 - 4 * s, h, _fmt(tokens),
+                       self.colors["text_tertiary"], right=True)
             self._f(8.5, True)
-            self._text(x + w * 0.82, ry, w * 0.18 - 6 * s, h, f"{rate:.1f}", ACCENT, right=True)
+            self._text(x + w * 0.82, ry, w * 0.18 - 6 * s, h, f"{rate:.1f}",
+                       self.colors["tint"], right=True)
         if not rows:
             self._f(8)
-            self._text(x, y, w, ROW_H * s, "아직 작업 속도 기록이 없습니다", DIM, alpha=150)
+            self._text(x, y, w, ROW_H * s, "아직 작업 속도 기록이 없습니다",
+                       self.colors["text_tertiary"], alpha=150)
         return y + max(1, len(rows)) * ROW_H * s + 6 * s
 
     def _draw_quota_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
         s, p = self.scale, self._painter
         self._f(6.5, True)
-        self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", DIM, alpha=125)
-        self._text(x + w * 0.30, y, w * 0.22, COLHEAD_H * s, "기간", DIM, alpha=125)
+        self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", self.colors["text_tertiary"], alpha=145)
+        self._text(x + w * 0.30, y, w * 0.22, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=145)
         self._text(x + w * 0.52, y, w * 0.22 - 4 * s, COLHEAD_H * s,
-                   "사용량", DIM, right=True, alpha=125)
+                   "사용량", self.colors["text_tertiary"], right=True, alpha=145)
         self._text(x + w * 0.74, y, w * 0.26 - 6 * s, COLHEAD_H * s,
-                   "다음 리셋", DIM, right=True, alpha=125)
+                   "다음 리셋", self.colors["text_tertiary"], right=True, alpha=145)
         y += COLHEAD_H * s
         for i, (title, label, used, reset, status) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
             if used >= 0:
                 hot = status in ("warn", "exhausted")
                 p.fillRect(QRectF(x, ry, w * _clamp(used, 0.0, 1.0), h),
-                           _c(STATE_COLORS["check"] if status == "exhausted" else GOLD,
+                           _c(self.colors["destructive"] if status == "exhausted" else self.colors["warning"],
                               22 if hot else 12))
-            color = STATE_COLORS["check"] if status == "exhausted" else (
-                GOLD if status == "warn" else FG
+            color = self.colors["destructive"] if status == "exhausted" else (
+                self.colors["warning"] if status == "warn" else self.colors["text_primary"]
             )
             self._f(8, True)
             self._text(x + 6 * s, ry, w * 0.28, h, title, color)
             self._f(8)
-            self._text(x + w * 0.30, ry, w * 0.22, h, label, "#C6CCDC")
+            self._text(x + w * 0.30, ry, w * 0.22, h, label, self.colors["text_secondary"])
             pct = f"사용 {used * 100:.0f}%" if used >= 0 else "미상"
-            self._text(x + w * 0.52, ry, w * 0.22 - 4 * s, h, pct, DIM, right=True)
+            self._text(x + w * 0.52, ry, w * 0.22 - 4 * s, h, pct,
+                       self.colors["text_tertiary"], right=True)
             self._text(x + w * 0.74, ry, w * 0.26 - 6 * s, h,
-                       reset or "미상", DIM, right=True)
+                       reset or "미상", self.colors["text_tertiary"], right=True)
         if not rows:
             self._f(8)
-            self._text(x, y, w, ROW_H * s, "한도 없음", DIM, alpha=150)
+            self._text(x, y, w, ROW_H * s, "한도 없음", self.colors["text_tertiary"], alpha=150)
         return y + max(1, len(rows)) * ROW_H * s + 6 * s
 
     def _draw_team_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
         s, p = self.scale, self._painter
         if not rows:
             self._f(8)
-            self._text(x, y, w, ROW_H * s, "아직 팀 데이터가 없습니다", DIM, alpha=150)
+            self._text(x, y, w, ROW_H * s, "아직 팀 데이터가 없습니다",
+                       self.colors["text_tertiary"], alpha=150)
         for i, (handle, check, working, waiting, cost, me) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
             if me:
-                p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(GOLD))
+                p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(self.colors["warning"]))
             self._f(8.5, me)
-            self._text(x + 6 * s, ry, w * 0.34, h, handle, FG if me else "#C6CCDC")
+            self._text(x + 6 * s, ry, w * 0.34, h, handle,
+                       self.colors["text_primary"] if me else self.colors["text_secondary"])
             self._f(8, True)
             mark = f"확인 {check}" if check else f"작업 {working}"
-            color = STATE_COLORS["check"] if check else (STATE_COLORS["working"] if working else DIM)
+            color = self.colors["destructive"] if check else (
+                self.colors["success"] if working else self.colors["text_tertiary"])
             self._text(x + w * 0.36, ry, w * 0.34, h, mark, color)
             self._f(8)
             self._text(x, ry, w - 6 * s, h, money_caption(False, cost),
-                       FG if me else DIM, right=True)
+                       self.colors["text_primary"] if me else self.colors["text_tertiary"], right=True)
         return y + max(1, len(rows)) * ROW_H * s + 6 * s
 
     def _draw_session_detail(self, x: float, y: float, w: float) -> float:
@@ -1473,7 +1839,10 @@ class MeterWindow(QWidget):
             return y
         s, p = self.scale, self._painter
         h = (DETAIL_H - 4) * s
-        p.fillRect(QRectF(x, y, w, h), _c(FG, 12))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(_c(self.colors["surface_glass_elevated"],
+                      255 if self.reduce_transparency else 220))
+        p.drawRoundedRect(QRectF(x, y, w, h), RADIUS_MD * s, RADIUS_MD * s)
         why = check_reason(rec.get("event"))
         waited = wait_caption(time.time(), rec.get("attention_at") or rec.get("last_seen"))
         bits = [part for part in (
@@ -1484,87 +1853,66 @@ class MeterWindow(QWidget):
             f"서브 {sub_ratio(rec) * 100:.0f}%" if sub_ratio(rec) > 0 else "",
         ) if part]
         self._f(7.5, True)
-        self._text(x + 6 * s, y, w - 12 * s, h * 0.5, " · ".join(bits) or "세션 상세", FG)
+        self._text(x + 10 * s, y + 2 * s, w - 20 * s, h * 0.5,
+                   " · ".join(bits) or "세션 상세")
         self._f(7, True)
         bw = 56 * s
-        self._text(x + 6 * s, y + h * 0.5, bw, h * 0.5, "영수증", ACCENT)
-        self._hit["act:copy"] = (x + 6 * s, y + h * 0.5, bw, h * 0.5)
-        self._text(x + 8 * s + bw, y + h * 0.5, 70 * s, h * 0.5, "이 프로젝트", ACCENT)
-        self._hit["act:project"] = (x + 8 * s + bw, y + h * 0.5, 70 * s, h * 0.5)
+        self._text(x + 10 * s, y + h * 0.5, bw, h * 0.5, "영수증 복사", self.colors["tint"])
+        self._hit["act:copy"] = (x + 8 * s, y + h * 0.5, bw + 8 * s, h * 0.5)
+        self._text(x + 20 * s + bw, y + h * 0.5, 88 * s, h * 0.5,
+                   "프로젝트 사용량", self.colors["tint"])
+        self._hit["act:project"] = (x + 16 * s + bw, y + h * 0.5, 96 * s, h * 0.5)
         return y + DETAIL_H * s
 
-    def _draw_session_head(self, x: float, y: float, w: float) -> float:
-        """세션 칸 이름. 아래 값과 같은 좌표·정렬이라야 어느 칸을 가리키는지 읽힌다."""
-        s = self.scale
-        wide = self.expanded
-        self._f(6.5, True)
-        for name, (a, b, right, _size) in zip(
-            SESSION_HEAD_WIDE if wide else SESSION_HEAD,
-            SESSION_COLS_WIDE if wide else SESSION_COLS,
-        ):
-            self._text(x + a * w + CELL_PAD * s, y, (b - a) * w - CELL_PAD * s,
-                       COLHEAD_H * s, name, DIM, right=right, alpha=125)
-        return y + COLHEAD_H * s
-
     def _draw_session_rows(self, x: float, y: float, w: float, rows: List[SessionRow]) -> None:
-        """상태·메인 속도·누적·컨텍스트를 서로 다른 칸에 고정해 그린다."""
+        """앱 런처 결과처럼 제목·맥락·즉시 판단할 값만 한 행에 놓는다."""
         s, p = self.scale, self._painter
-        top = max([r[5] for r in rows] or [0.0]) or 1.0
         wide = self.expanded
         focused = self.focus[1] if (self.focus or ("", ""))[0] == "project" else None
-        cols = SESSION_COLS_WIDE if wide else SESSION_COLS
+        if not rows:
+            self._f(8.5)
+            self._text(x + 8 * s, y, w - 16 * s, ROW_H * s, "표시할 세션이 없습니다",
+                       self.colors["text_tertiary"])
+            return
         for i, (_key, attention, project, model, effort, rate, vendor, live,
                 opened, tokens, ctx, has_window, sub) in enumerate(rows):
             ry = y + i * ROW_H * s
             h = (ROW_H - 3) * s
-            if project == focused:  # 그래프가 지금 보고 있는 줄
-                p.fillRect(QRectF(x, ry, w, h), _c(ACCENT, 20))
-            state_end = cols[0][1]
-            p.fillRect(QRectF(x, ry, w * state_end, h), _c(STATE_COLORS[attention], 18))
-            p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(STATE_COLORS[attention]))
-            rate_col = cols[3] if wide else cols[2]
-            if rate >= 0.01:
-                p.fillRect(QRectF(x + rate_col[0] * w, ry + h - 2 * s,
-                                  (rate_col[1] - rate_col[0]) * w * _clamp(rate / top, 0, 1),
-                                  2 * s), _c(ACCENT))
-            ctx_col = cols[5] if wide else cols[4]
-            if has_window:
-                p.fillRect(QRectF(x + ctx_col[0] * w, ry + h - 2 * s,
-                                  (ctx_col[1] - ctx_col[0]) * w * _clamp(ctx, 0, 1), 2 * s),
-                           _c(ctx_color(ctx)))
+            selected = _key == self.open_key or project == focused
+            if selected:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(_c(self.colors["tint"], 20))
+                p.drawRoundedRect(QRectF(x, ry, w, h), RADIUS_SM * s, RADIUS_SM * s)
+            state_color = self._state_color(attention)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(_c(state_color))
+            p.drawEllipse(QRectF(x + 8 * s, ry + 11 * s, 7 * s, 7 * s))
             self._hit[f"row:{i}"] = (x, ry, w, ROW_H * s)
-            speed = _rate(rate) if rate >= 0.01 else "—"
             context = ctx_status_caption(ctx, has_window)
+            details = [ATTENTION_LABELS.get(attention, attention), model or "모델 미상"]
             if wide:
-                cells = [
-                    (ATTENTION_LABELS.get(attention, attention), STATE_COLORS[attention], True),
-                    (project, FG if live else "#C6CCDC", live),
-                    (model or "미상", "#C6CCDC", False),
-                    (speed, ACCENT if rate >= 0.01 else DIM, rate >= 0.01),
-                    (_fmt(tokens), DIM, False),
-                    (context, ctx_color(ctx) if has_window else DIM, ctx >= CTX_WARN),
-                    (opened, DIM, False),
-                    (effort or "—", KIND_COLORS["cache_write"], False),
-                ]
-            else:
-                cells = [
-                    (ATTENTION_LABELS.get(attention, attention), STATE_COLORS[attention], True),
-                    (project, FG if live else "#C6CCDC", live),
-                    (speed, ACCENT if rate >= 0.01 else DIM, rate >= 0.01),
-                    (_fmt(tokens), DIM, False),
-                    (context, ctx_color(ctx) if has_window else DIM, ctx >= CTX_WARN),
-                ]
-            for (text, color, bold), (a, b, right, size) in zip(
-                cells, cols
-            ):
-                if not text:
-                    continue
-                self._f(size, bold)
-                cx, cw = x + a * w + CELL_PAD * s, (b - a) * w - CELL_PAD * s
-                fm = QFontMetricsF(self._font)
-                self._text(cx, ry, cw, h,
-                           fm.elidedText(text, Qt.TextElideMode.ElideRight, cw),
-                           color, right=right)
+                details.extend(part for part in (vendor, effort, opened,
+                                                  f"서브 {sub * 100:.0f}%" if sub > 0 else "") if part)
+            subtitle = " · ".join(details)
+            left, trailing = x + 23 * s, 98 * s
+            title_w = max(60 * s, w - trailing - 31 * s)
+            self._f(9.5, live)
+            fm = QFontMetricsF(self._font)
+            self._text(left, ry + 2 * s, title_w, 20 * s,
+                       fm.elidedText(project, Qt.TextElideMode.ElideRight, title_w),
+                       self.colors["text_primary"] if live else self.colors["text_secondary"])
+            self._f(7.5)
+            fm = QFontMetricsF(self._font)
+            self._text(left, ry + 20 * s, title_w, 16 * s,
+                       fm.elidedText(subtitle, Qt.TextElideMode.ElideRight, title_w), state_color)
+            self._f(9, rate >= 0.01)
+            primary = _rate(rate) if rate >= 0.01 else _fmt(tokens)
+            self._text(x, ry + 2 * s, w - 8 * s, 20 * s, primary,
+                       self.colors["tint"] if rate >= 0.01 else self.colors["text_secondary"], right=True)
+            self._f(7.5, has_window and ctx >= CTX_WARN)
+            secondary = f"컨텍스트 {context}" if has_window else "누적"
+            self._text(x, ry + 20 * s, w - 8 * s, 16 * s, secondary,
+                       self._ctx_color(ctx) if has_window else self.colors["text_tertiary"], right=True)
 
     # ── 상호작용 ─────────────────────────────────────────────────────────
     def _hit_test(self, pos: Any) -> str:
@@ -1591,6 +1939,24 @@ class MeterWindow(QWidget):
         """포인터와 네이티브 키보드 버튼이 공유하는 단일 동작 경로."""
         if not target:
             return False
+        if target == "search":
+            self._open_palette()
+            return True
+        if target.startswith("palette:"):
+            try:
+                self.palette_index = int(target.split(":", 1)[1])
+            except ValueError:
+                return False
+            return self._activate_palette()
+        if target.startswith("session:"):
+            self._open_session(target.split(":", 1)[1])
+            return True
+        if target == "command:scope":
+            self._toggle_scope()
+            return True
+        if target == "command:settings":
+            self._popup_menu()
+            return True
         if target.startswith("mode:"):
             self._set_mode(target.split(":", 1)[1])
             return True
@@ -1694,6 +2060,7 @@ class MeterWindow(QWidget):
         self.update()
 
     def _set_filter(self, name: str) -> None:
+        self.panel, self.rows_on = "sessions", True
         self.session_filter = name if name in SESSION_FILTERS else "live"
         self.scroll = 0
         self.open_key = ""
@@ -1741,7 +2108,9 @@ class MeterWindow(QWidget):
         self._store_prefs()
 
     def _escape(self) -> None:
-        if self.focus or self.open_key:
+        if self.palette_open:
+            self._close_palette()
+        elif self.focus or self.open_key:
             self.focus = None
             self.open_key = ""
             self._resize_to_content()
@@ -1750,6 +2119,22 @@ class MeterWindow(QWidget):
             self._hide_overlay()
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802
+        modifiers = event.modifiers()
+        command = bool(modifiers & (Qt.KeyboardModifier.ControlModifier |
+                                    Qt.KeyboardModifier.MetaModifier))
+        if command and event.key() == Qt.Key.Key_K:
+            self._open_palette()
+            return
+        if command and event.key() == Qt.Key.Key_Comma:
+            self._popup_menu()
+            return
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            rows = [self._controls[name] for name in sorted(self._controls)
+                    if name.startswith("row:") and self._controls[name].isVisible()]
+            if rows:
+                rows[0 if event.key() == Qt.Key.Key_Down else -1].setFocus(
+                    Qt.FocusReason.TabFocusReason)
+                return
         if event.key() == Qt.Key.Key_Escape:
             self._escape()
 
@@ -1811,8 +2196,10 @@ class MeterWindow(QWidget):
         self._popup_menu(event.globalPos())
 
     def _popup_menu(self, pos: Any = None) -> None:
+        if self.palette_open:
+            self._close_palette()
         menu = QMenu(self)
-        menu.setStyleSheet(MENU_QSS)
+        menu.setStyleSheet(self._menu_style())
         self._end_hint()
         read_only = self.meter is None or getattr(self.meter, "read_only", False)
         where = pos or self.mapToGlobal(
@@ -1820,7 +2207,8 @@ class MeterWindow(QWidget):
         )
 
         if self.mini:  # 미니에서는 패널·그래프 항목이 아무 일도 안 한다 — 아예 안 보인다
-            for label, fn in (("미니 모드 해제", self._toggle_mini),
+            for label, fn in (("검색 또는 명령…  ⌘K", self._open_palette),
+                              ("미니 모드 해제", self._toggle_mini),
                               ("항상 위 끄기" if self.on_top else "항상 위 켜기", self._toggle_top),
                               ("오버레이 숨기기 · 측정 계속", self._hide_overlay),
                               ("TokenMeter 종료 · 측정 중지", self._quit)):
@@ -1828,17 +2216,41 @@ class MeterWindow(QWidget):
             menu.exec(where)
             return
 
-        panels = menu.addMenu("패널 보기")
-        panels.setStyleSheet(MENU_QSS)
+        self._act(menu, "검색 또는 명령…  ⌘K", self._open_palette)
+
+        panels = menu.addMenu("콘텐츠")
+        panels.setStyleSheet(self._menu_style())
         for name in self._visible_panels():
             mark = "● " if name == self.panel else "   "
             self._act(panels, mark + PANEL_TITLES[name], lambda _=False, n=name: self._set_panel(n))
 
+        filters = menu.addMenu("세션 필터")
+        filters.setStyleSheet(self._menu_style())
+        for name in SESSION_FILTERS:
+            mark = "● " if self.panel == "sessions" and name == self.session_filter else "   "
+            self._act(filters, mark + SESSION_FILTER_TITLES[name],
+                      lambda _=False, n=name: self._set_filter(n))
+
         sizes = menu.addMenu(f"창 크기 ({self.scale * 100:.0f}%)")
-        sizes.setStyleSheet(MENU_QSS)
+        sizes.setStyleSheet(self._menu_style())
+        for name, label in (("S", "미터만"), ("M", "기본"), ("L", "상세")):
+            mark = "● " if name == self._mode() else "   "
+            self._act(sizes, mark + label, lambda _=False, n=name: self._set_mode(n))
+        sizes.addSeparator()
         self._act(sizes, "크게  +10%", lambda: self._set_scale(self.scale * 1.1), self.scale < 2.0)
         self._act(sizes, "작게  −10%", lambda: self._set_scale(self.scale / 1.1), self.scale > 1.0)
         self._act(sizes, "기본 크기 (100%)", lambda: self._set_scale(1.0))
+
+        appearance = menu.addMenu("모양과 접근성")
+        appearance.setStyleSheet(self._menu_style())
+        for name, label in (("system", "시스템 테마"), ("dark", "다크"), ("light", "라이트")):
+            mark = "● " if name == self.theme_mode else "   "
+            self._act(appearance, mark + label, lambda _=False, n=name: self._set_theme(n))
+        appearance.addSeparator()
+        self._act(appearance, ("✓ " if self.reduce_transparency else "   ") + "투명도 줄이기",
+                  self._toggle_transparency)
+        self._act(appearance, ("✓ " if self.reduce_motion else "   ") + "모션 줄이기",
+                  self._toggle_motion)
 
         for label, fn, enabled in [
             ("상세 보기 닫기" if self.expanded else "상세 보기 열기", self._toggle_expand, True),
@@ -1857,6 +2269,21 @@ class MeterWindow(QWidget):
         ]:
             self._act(menu, label, fn, enabled)
         menu.exec(where)
+
+    def _set_theme(self, name: str) -> None:
+        self.theme_mode = name if name in ("system", "dark", "light") else "dark"
+        self._apply_theme()
+        self._store_prefs()
+
+    def _toggle_transparency(self) -> None:
+        self.reduce_transparency = not self.reduce_transparency
+        self._store_prefs()
+        self.update()
+
+    def _toggle_motion(self) -> None:
+        self.reduce_motion = not self.reduce_motion
+        self._store_prefs()
+        self.update()
 
     def _set_scale(self, value: float) -> None:
         self.scale = _clamp(value, 1.0, 2.0)
@@ -1970,10 +2397,9 @@ class MeterWindow(QWidget):
             self._tray = None
 
     def _tray_click(self, _reason: Any = None) -> None:
-        if self.mini:
-            self._toggle_mini()
         self.show()
         self.raise_()
+        self._open_palette()
 
     def _update_tray(self) -> None:
         if self._tray is None:
@@ -1981,10 +2407,11 @@ class MeterWindow(QWidget):
         try:
             n = int(self._counts().get("check") or 0)
             pix = QPixmap(18, 18)
-            pix.fill(_c(BG))
+            pix.fill(_c(self.colors["background_primary"]))
             painter = QPainter(pix)
-            painter.fillRect(0, 0, 18, 18, _c(STATE_COLORS["check"] if n else DIM))
-            painter.setPen(_c(BG))
+            painter.fillRect(0, 0, 18, 18,
+                             _c(self.colors["destructive"] if n else self.colors["text_tertiary"]))
+            painter.setPen(_c(self.colors["background_primary"]))
             painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, str(n) if n else "·")
             painter.end()
             self._tray.setIcon(pix)
@@ -2004,6 +2431,8 @@ class MeterWindow(QWidget):
             pass
 
     def _hide_overlay(self) -> None:
+        if self.palette_open:
+            self._close_palette()
         self._store_prefs()
         self.hide()
 
@@ -2061,7 +2490,6 @@ def _demo() -> None:
     # 게이지 매핑: 단조 증가하고 0~1 에서 클램프된다
     assert gauge_target(0) == 0.0 and gauge_target(DEFAULT_FULL_SCALE * 99) == 1.0
     assert gauge_target(10) < gauge_target(50) < gauge_target(DEFAULT_FULL_SCALE)
-    assert seg_color(0.0) != seg_color(0.9), "게이지 끝이 같은 색이면 미터로 안 읽힌다"
 
     app = QApplication.instance() or QApplication([])
     global _save_prefs
@@ -2155,7 +2583,6 @@ def _demo() -> None:
     w.status["sessions"]["claude-code/s1"]["sub_cost"] = 1.0  # 4.0 중 1.0 = 25%
     rows, note = w._build_rows()
     opened = time.strftime("%m-%d %H:%M", time.localtime(1786377600.0))
-    assert SESSION_HEAD == ("상태", "프로젝트", "메인/s", "누적", "컨텍스트")
     assert [ATTENTION_LABELS[row[1]] for row in rows] == ["확인", "작업", "대기", "종료"], rows
     assert rows[0] == ("claude-code/s1", "check", "tokenmeter", "opus-5", "xhi", 0.0,
                        "anthropic", True, opened, 40, 0.75, True, 0.25), rows[0]
@@ -2187,7 +2614,9 @@ def _demo() -> None:
     assert ctx_ratio({"ctx": 150_000, "ctx_win": 200_000}) == 0.75
     assert ctx_ratio({"ctx": 999_999, "ctx_win": 0}) == 0.0, "창을 모르면 % 를 지어내지 않는다"
     assert ctx_ratio({"ctx": 300_000, "ctx_win": 200_000}) == 1.0, "100% 를 넘지 않는다"
-    assert ctx_color(0.1) == DIM and ctx_color(0.75) == GOLD and ctx_color(0.95) != ctx_color(0.75)
+    assert ctx_color(0.1) == THEMES["dark"]["text_tertiary"]
+    assert ctx_color(0.75) == THEMES["dark"]["warning"]
+    assert ctx_color(0.95) != ctx_color(0.75)
 
     # 구독분이 섞여 있으면 금액에 '≈' 가 붙는다 (청구서가 아니라 환산가)
     assert not w._approx()
@@ -2225,6 +2654,9 @@ def _demo() -> None:
     assert short_model("anthropic/claude-opus-5") == "opus-5"
     assert short_model("gpt-5.6-sol") == "gpt-5.6-sol" and short_model("") == "?"
     assert short_effort("medium") == "med" and short_effort("") == ""
+    assert search_score("tknmtr", "TokenMeter") > 0
+    assert search_score("사용량", "사용량 히스토리") > search_score("사용량", "팀 사용량")
+    assert search_score("없는명령", "TokenMeter") == 0
 
     # 히스토리가 비어도 죽지 않고 안내만 남는다
     saved, w.status = w.status, {}
@@ -2254,8 +2686,12 @@ def _demo() -> None:
                 n = w._row_count()
                 ww, wh = w._size()
                 w.resize(ww, wh)
-                head = HEAD_H + (COLHEAD_H if panel == "sessions" else 0)  # 칸 이름 한 줄
-                need = (PAD * 2 + METER_H + (head + n * ROW_H + 8 if n else 0) + FOOT_H) * scale
+                extra = (COLHEAD_H + (0 if w.expanded else BTN_H)) if panel == "rates" else (
+                    COLHEAD_H if panel == "quota" else 0
+                )
+                head = HEAD_H + extra
+                need = (PAD * 2 + CHROME_H + METER_H
+                        + (head + n * ROW_H + SPACE_2 if n else 0) + FOOT_H) * scale
                 assert wh >= need - 1.0, (scale, panel, rows_on, wh, need)
                 assert not w.grab().isNull(), "paintEvent 가 죽지 않는지 실제로 한 번 그려본다"
 
@@ -2275,13 +2711,13 @@ def _demo() -> None:
     narrow = w._size()
     w._toggle_expand()
     wide = w._size()
-    assert w.expanded and wide[0] > narrow[0] and wide[1] == narrow[1], (narrow, wide)
+    assert w.expanded and wide[0] > narrow[0] and wide[1] >= narrow[1], (narrow, wide)
     assert wide[0] == int(BASE_W * EXPAND_W), wide
     assert w._cap("board") == PANEL_ROWS["board"] * EXPAND_ROWS
-    # 세션만은 접든 펴든 10줄 — 나머지는 스크롤로 본다
+    # 기본은 다섯 줄, 상세는 열 줄 — 화면을 키운 만큼 정보 밀도도 높인다.
     assert w._cap("sessions") == 10
     w.expanded = False
-    assert w._cap("sessions") == 10
+    assert w._cap("sessions") == 5
     w.expanded = True
 
     # 히스토리와 아래 목록은 서로 독립이다 (접어둔 목록이 그래프에 끌려 열리면 안 된다)
@@ -2313,29 +2749,49 @@ def _demo() -> None:
         del book[key]
     w._rebuild_rows()
 
-    # 그래프는 일별/속도 L에서만, 세션 L은 넓은 표만 그린다.
+    # 그래프는 일별/속도 L에서만, 기본 화면은 검색과 현재 콘텐츠 하나만 노출한다.
     w.panel, w.expanded, w.rows_on = "days", True, True
     w._rebuild_rows()
     assert not w.grab().isNull(), "확장 모드 paintEvent"
-    assert "mode:S" in w._hit and "close" in w._hit and "span:7d" in w._hit, w._hit.keys()
-    assert "scope" in w._hit and "panel:sessions" in w._hit and "panel:rates" in w._hit, w._hit.keys()
+    assert "search" in w._hit and "close" in w._hit and "span:7d" in w._hit, w._hit.keys()
+    assert "scope" in w._hit and not any(k.startswith("panel:") for k in w._hit), w._hit.keys()
     w.panel = "sessions"
     w._rebuild_rows()
     w.grab()
-    assert "filter:live" in w._hit and not any(k.startswith("span:") for k in w._hit), w._hit.keys()
+    assert "search" in w._hit and not any(k.startswith("filter:") for k in w._hit), w._hit.keys()
+    assert not any(k.startswith("span:") for k in w._hit), w._hit.keys()
 
-    # 크기 버튼: 누른 자리가 곧 그 단계다 (× 는 종료라 좌표만 확인하고 안 누른다)
+    # 크기 단계는 화면을 점유하지 않고 명령 경로로만 전환한다.
     for name, (rows_on, expanded) in (("S", (False, False)), ("M", (True, False)),
                                       ("L", (True, True))):
-        hx, hy, hw, hh = w._hit[f"mode:{name}"]
-        assert w._click(QPoint(int(hx + hw / 2), int(hy + hh / 2)))
+        assert w._activate_target(f"mode:{name}")
         assert (w.rows_on, w.expanded) == (rows_on, expanded), (name, w.rows_on, w.expanded)
         assert w._mode() == name, (name, w._mode())
         w.resize(*w._size())
-        w.grab()  # 단계마다 다시 그려 버튼 좌표를 갱신한다 (폭이 바뀐다)
-    cx, _, cw, _ = w._hit["close"]
-    assert not any(cx < hx + hw and hx < cx + cw for k, (hx, _, hw, _) in w._hit.items()
-                   if k.startswith("mode:")), "× 가 크기 버튼과 겹치면 오클릭으로 종료된다"
+        w.grab()
+
+    # 런처: 열면 바로 입력할 수 있고, 부분수열 검색·위아래 선택·실행을 한 경로로 처리한다.
+    w._open_palette()
+    w.grab()
+    assert w.palette_open and not w._search_field.isHidden() and w.palette_results
+    assert "palette:0" in w._hit and not any(k.startswith("panel:") for k in w._hit)
+    w._search_field.setText("tknmtr")
+    assert any(item["title"] == "tokenmeter" for item in w.palette_results), w.palette_results
+    before = w.palette_index
+    w._move_palette(1)
+    assert w.palette_index != before or len(w.palette_results) == 1
+    w._close_palette()
+    assert not w.palette_open and w._search_field.isHidden()
+
+    # 라이트·불투명·모션 감소에서도 같은 계층과 렌더 경로를 유지한다.
+    w._set_theme("light")
+    w.reduce_transparency = w.reduce_motion = True
+    w.rate = 100.0
+    w._advance(0.1)
+    assert w.gauge == gauge_target(w.rate, w.full_scale) and w.peak == 0.0
+    assert not w.grab().isNull()
+    w._set_theme("dark")
+    w.reduce_transparency = w.reduce_motion = False
 
     # 범위 버튼: 그린 자리를 누르면 그 범위가 된다
     w.panel, w.expanded = "days", True
@@ -2402,7 +2858,7 @@ def _demo() -> None:
     w._set_scale(w.scale * 1.1)
     assert abs(w.scale - 1.1) < 1e-9, w.scale
     w._set_scale(99.0)
-    assert w.scale == 2.0
+    assert 1.0 <= w.scale <= 2.0  # 작은 화면이면 전체가 보이도록 자동 보정한다
     w._set_scale(0.01)
     assert w.scale == 1.0
     print("overlay.py 미터 자가 검증 통과")

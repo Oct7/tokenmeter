@@ -185,6 +185,49 @@ def test_painted_actions_have_native_accessible_controls(_tmp: Path) -> None:
         assert "panel:board" not in window._controls or not window._controls["panel:board"].isVisible()
 
 
+def test_command_launcher_fuzzy_search_opens_session(_tmp: Path) -> None:
+    with _window() as window:
+        window.status = _sessions()
+        window._rebuild_rows()
+
+        window._open_palette()
+        _app().processEvents()
+        assert window.palette_open and window._search_field.isVisible()
+        assert window._search_field.accessibleName() == "세션 또는 명령 검색"
+        assert overlay.search_score("nwr", "newer") > 0
+
+        window._search_field.setText("nwr")
+        assert window.palette_results[0]["target"] == "session:svc/newer", window.palette_results
+        assert window._activate_palette()
+        assert not window.palette_open
+        assert window.panel == "sessions" and window.open_key == "svc/newer"
+
+
+def test_light_reduced_effects_keep_same_render_path(_tmp: Path) -> None:
+    with _window() as window:
+        window._set_theme("light")
+        window.reduce_transparency = window.reduce_motion = True
+        window.rate = 100.0
+        window._advance(0.1)
+
+        assert window.colors == overlay.THEMES["light"]
+        assert window.gauge == overlay.gauge_target(window.rate, window.full_scale)
+        assert window.peak == window.pulse == 0.0
+        assert not window.grab().isNull()
+
+
+def test_animation_timer_slows_when_surface_is_idle(_tmp: Path) -> None:
+    with _window() as window:
+        window.rate = window.gauge = window.pulse = 0.0
+        window.card = None
+        window._tick()
+        assert window._timer.interval() == 250
+
+        window.rate = 10.0
+        window._tick()
+        assert window._timer.interval() == window._active_interval
+
+
 def test_manual_sync_does_not_block_gui_thread(_tmp: Path) -> None:
     class _OnlineBoard(_Board):
         online = True
