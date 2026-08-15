@@ -84,7 +84,7 @@ tokenmeter on                     # resume measurement
 tokenmeter uninstall              # remove only TokenMeter hooks
 ```
 
-Drag the overlay to move it and use the wheel to scroll session rows. Press `⌘K`/`Ctrl+K` to search sessions, usage, quota, and view commands, then use `↑↓` and `Enter` to run one. Size, theme, reduced transparency, and reduced motion live under `⋯` or the right-click menu. `×` hides only the overlay, so measurement continues. To stop measurement, choose `TokenMeter 종료 · 측정 중지` from that menu or the tray.
+Drag the overlay to move it and use the wheel to scroll session rows. Use the visible `S/M/L` controls to switch between meter, panel, and detail sizes; choose Sessions, Quota, Speed, or Daily and session filters directly. `⌘K`/`Ctrl+K` is an optional quick search. Theme, reduced transparency, and reduced motion live under `⋯` or the right-click menu. `×` hides only the overlay, so measurement continues. To stop measurement, choose `TokenMeter 종료 · 측정 중지` from that menu or the tray.
 
 The global `tokens/s` meter is aggregate output throughput, including sub-agents. Session and model `tok/s` exclude sub-agent output and show the main model's throughput; these rates are log-delta arrival rates, not a benchmark of the provider's streaming generation speed. Session rows keep status, cumulative output, and context usage in separate columns. The optional Team tab is hidden while its endpoint is offline.
 

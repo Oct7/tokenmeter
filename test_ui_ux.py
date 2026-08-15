@@ -185,6 +185,24 @@ def test_painted_actions_have_native_accessible_controls(_tmp: Path) -> None:
         assert "panel:board" not in window._controls or not window._controls["panel:board"].isVisible()
 
 
+def test_tokenmeter_controls_are_visible_before_optional_search(_tmp: Path) -> None:
+    """TokenMeter 계기판이 기본이고, 검색은 요청할 때만 나타난다."""
+    with _window() as window:
+        window.status = _sessions()
+        window._rebuild_rows()
+        window.grab()
+
+        expected = {"scope", "mode:S", "mode:M", "mode:L", "panel:sessions",
+                    "panel:quota", "panel:rates", "panel:days", "filter:live"}
+        assert expected <= window._hit.keys(), window._hit.keys()
+        assert "search" not in window._hit
+        assert not window.palette_open and window._search_field.isHidden()
+
+        window.hide()
+        window._tray_click()
+        assert window.isVisible() and not window.palette_open
+
+
 def test_command_launcher_fuzzy_search_opens_session(_tmp: Path) -> None:
     with _window() as window:
         window.status = _sessions()
