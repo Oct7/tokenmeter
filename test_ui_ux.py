@@ -658,17 +658,41 @@ def test_wide_session_table_fits_every_column(_tmp: Path) -> None:
         window.session_filter = "all"
         window._rebuild_rows()
         window.grab()
-        width = window.width() - 2 * PAD * window.scale
-        # (칸 index, 넣어볼 최악의 값, 글자 크기). 모델은 short_model/short_effort 를
-        # 거친 뒤의 실제 최댓값을 쓴다 — 칸 안에 들어와야 elide 가 안 걸린다.
-        worst = [(0, "확인", 8.0), (2, "gpt-5.6-sol · med", 8.0), (3, "412/s", 8.5),
-                 (4, "9.7M", 8.0), (5, "100% · 높음", 8.0), (6, "08-16 00:11", 7.5)]
-        for index, text, size in worst:
-            start, end, _right, _size = overlay.SESSION_COLS_WIDE[index]
-            room = (end - start) * width - overlay.CELL_PAD * window.scale
-            assert _metrics(window, size, True, mono=True).horizontalAdvance(text) <= room, (
-                f"{text!r} 가 {index}번 칸({room:.0f}px)을 넘는다"
-            )
+        # 칸 폭을 픽셀로 못 박으면 폰트가 다른 플랫폼(CI 의 리눅스)에서 깨진다 — 한글이
+        # 섞인 '100% · 높음' 은 mono 폰트마다 폭이 크게 다르다. 어디서나 지켜야 하는 건
+        # "하드 클립되지 않는다"와 "값이 달라 보이는 칸은 줄지 않는다" 두 가지다.
+        # 값은 실제로 나올 수 있는 최댓값이다: 세션 누적은 억 단위까지 관측되고(`538.6M`),
+        # 세션 tok/s 는 게이지 만배율(3000)을 넘지 않아 `3.0k/s` 가 상한이다.
+        # 프로젝트·모델은 510px 에 7칸이라 어차피 줄어드는 칸이라 must_fit 이 아니다.
+        cases = [
+            (overlay.SESSION_COLS_WIDE, "L", {
+                0: ("확인", 8.0, False, True), 1: ("acme/web-client", 9.0, False, False),
+                2: ("gpt-5.6-sol · med", 8.0, True, False), 3: ("3.0k/s", 8.5, True, True),
+                4: ("538.6M", 8.0, True, True), 5: ("100% · 높음", 8.0, True, False),
+                6: ("08-16 00:11", 7.5, True, True),
+            }),
+            (overlay.SESSION_COLS, "M", {
+                0: ("확인", 8.0, False, True), 1: ("acme/web-client", 9.0, False, False),
+                2: ("3.0k/s", 8.5, True, True), 3: ("538.6M", 8.0, True, True),
+                4: ("100% · 높음", 7.5, True, False),
+            }),
+        ]
+        for columns, mode, worst in cases:
+            window._set_mode(mode)
+            width = window.width() - 2 * PAD * window.scale
+            for index, (text, size, mono, must_fit) in worst.items():
+                start, end, _right, _size = columns[index]
+                room = (end - start) * width - overlay.CELL_PAD * window.scale
+                metrics = _metrics(window, size, True, mono=mono)
+                shown = metrics.elidedText(text, Qt.TextElideMode.ElideRight, room)
+                assert shown, f"{mode}/{index} {text!r} 가 {room:.0f}px 에서 통째로 사라진다"
+                assert metrics.horizontalAdvance(shown) <= room + 0.5, (
+                    f"{mode}/{index} {text!r} 가 {room:.0f}px 를 넘쳐 잘린다"
+                )
+                if must_fit:  # 줄면 값이 달라 보이는 칸 — '…' 가 나오면 안 된다
+                    assert shown == text, (
+                        f"{mode}/{index} {text!r} 가 {room:.0f}px 에서 줄었다: {shown!r}"
+                    )
 
 
 def test_graph_peak_label_stays_inside_the_plot(_tmp: Path) -> None:
