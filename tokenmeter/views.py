@@ -23,25 +23,39 @@ CHECK_REASONS = {
 SESSION_FILTERS = ("live", "archive", "all")
 SESSION_FILTER_TITLES = {"live": "LIVE", "archive": "ARCHIVE", "all": "ALL"}
 SESSION_ARCHIVE_SECONDS = 3600.0
+UNKNOWN_PROJECT = "폴더 미상"
+LEGACY_UNKNOWN = "(unknown)"
 
 
 def check_reason(event: Any) -> str:
     return CHECK_REASONS.get(str(event or ""), "")
 
 
-def project_label(project: Any, cwd: Any = "") -> str:
-    name = str(project or "").strip() or "(unknown)"
-    if not cwd:
-        return name
+def project_key(cwd: Any) -> str:
+    """에이전트를 실행한 폴더 → 프로젝트 키 '상위/leaf'.
+
+    leaf 이름만 쓰면 서로 다른 저장소의 같은 폴더명(`api`, `web`)이 한 프로젝트로
+    합쳐진다. 집계(state)와 표시(project_label)가 같은 규칙을 써야 세션 목록과
+    프로젝트 패널의 이름이 어긋나지 않는다.
+    """
+    text = str(cwd or "").strip()
+    if not text:
+        return ""
     try:
-        path = Path(str(cwd))
-        parent = path.parent.name
-        leaf = path.name or name
-        if parent and parent not in {".", "/", path.anchor}:
-            return f"{parent}/{leaf}"
+        path = Path(text)
     except (TypeError, ValueError):
-        return name
-    return name
+        return ""
+    leaf = path.name
+    if not leaf:
+        return ""
+    parent = path.parent.name
+    return f"{parent}/{leaf}" if parent and parent not in {".", path.anchor} else leaf
+
+
+def project_label(project: Any, cwd: Any = "") -> str:
+    """화면에 쓸 프로젝트 이름. cwd 를 알면 그걸로, 모르면 저장된 키를 그대로 쓴다."""
+    name = project_key(cwd) or str(project or "").strip()
+    return UNKNOWN_PROJECT if name in ("", LEGACY_UNKNOWN) else name
 
 
 def money_caption(approx: bool, amount: Any) -> str:

@@ -480,7 +480,9 @@ def _doctor_one(spec: ServiceSpec) -> None:
     tokens = sum(d.total for d in deltas)
     usd = sum(d.cost() for d in deltas)
     models = sorted({d.model for d in deltas})
-    projects = sorted({d.project or "(unknown)" for d in deltas})
+    # 로그에 cwd 가 없는 서비스는 계량 단계에서 훅 기록으로 채운다 (Meter._resolve_project).
+    # 그 사실을 안 적으면 doctor 만 보고 '프로젝트 귀속이 깨졌다' 고 오해한다.
+    projects = sorted({d.project or "로그에 없음 · 훅 기록에서 보강" for d in deltas})
     sessions = sorted({d.session for d in deltas if d.session})
     vendors = sorted({d.vendor for d in deltas if d.vendor})
     print(f"   추출 델타 : {len(deltas):,}건 · {tokens:,} 토큰 · {_usd(usd)}")

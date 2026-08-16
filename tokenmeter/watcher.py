@@ -24,6 +24,7 @@ from .config import TOKEN_FIELDS, Config, ServiceSpec, dig, resolve_plan
 from .endpoints import resolve as resolve_endpoint
 from .meter import Meter, TokenDelta, live_path
 from .pricing import context_window, vendor_of
+from .views import project_key
 
 try:  # watchdog 은 있으면 쓰고, 없으면 폴링만으로 동작한다
     from watchdog.events import FileSystemEventHandler
@@ -351,7 +352,7 @@ class ServiceReader:
             output_tokens=output_tokens,
             model=model,
             service=self.spec.name,
-            project=Path(cwd).name if cwd else "",
+            project=project_key(cwd),
             session=session,
             vendor=vendor,
             plan=self.plan,

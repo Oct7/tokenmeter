@@ -32,8 +32,8 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from tokenmeter import overlay
 from tokenmeter.config import Config
 from tokenmeter.meter import Meter, TokenDelta, session_views
-from tokenmeter.overlay import CARD_H, CHIP_H, MeterWindow
-from tokenmeter.views import ctx_status_caption
+from tokenmeter.overlay import CARD_H, CHIP_H, FOOT_H, PAD, MeterWindow
+from tokenmeter.views import UNKNOWN_PROJECT, ctx_status_caption, project_key
 
 
 class _Board:
@@ -193,11 +193,18 @@ def test_tokenmeter_controls_are_visible_before_optional_search(_tmp: Path) -> N
         window.grab()
 
         expected = {"scope", "mode:S", "mode:M", "mode:L", "panel:sessions",
-                    "panel:projects", "panel:quota", "panel:rates", "panel:days",
+                    "panel:projects", "panel:quota",
                     "filter:live", "filter:archive", "filter:all"}
         assert expected <= window._hit.keys(), window._hit.keys()
         assert "search" not in window._hit
         assert not window.palette_open and window._search_field.isHidden()
+
+        # 속도·일별은 L(상세)에서만 나온다 — M 에 탭이 6개면 라벨이 붙어 못 읽는다
+        assert "panel:rates" not in window._hit and "panel:days" not in window._hit
+        window._set_mode("L")
+        window.grab()
+        assert {"panel:rates", "panel:days"} <= window._hit.keys()
+        window._set_mode("M")
 
         window.hide()
         window._tray_click()
@@ -539,6 +546,184 @@ def test_quota_row_sets_and_persists_representative_window(_tmp: Path) -> None:
         assert "row:2" not in window._hit
         window._set_quota_representative(2)
         assert window.quota_representatives == {"claude-code": key}
+
+
+def _metrics(window: MeterWindow, size: float, bold: bool = False,
+             mono: bool = False) -> QFontMetricsF:
+    """paintEvent 밖에서 `_f` 와 같은 폰트를 만든다 (`_f` 는 살아 있는 QPainter 를 쓴다)."""
+    font = QFont(window._data_font if mono else window._ui_font)
+    font.setBold(bold)
+    font.setPointSizeF(max(6.0, size * window.scale))
+    return QFontMetricsF(font)
+
+
+def _quota_windows() -> Dict[str, Any]:
+    now = time.time()
+    return {"updated_at": now, "errors": {}, "windows": [
+        {"source": "claude-code", "title": "Claude Code", "plan": "subscription",
+         "kind": "weekly", "label": "Fable 주간", "used": 0.14, "resets_at": now + 86400,
+         "period_seconds": 7 * 86400, "status": "ok"},
+        {"source": "codex", "title": "Codex", "plan": "subscription",
+         "kind": "weekly", "label": "GPT-5.3-high 주간", "used": 0.17,
+         "resets_at": now + 86400, "period_seconds": 7 * 86400, "status": "ok"},
+    ]}
+
+
+def test_simple_mode_keeps_only_the_meter(_tmp: Path) -> None:
+    """S 는 계기판 그 자체 — 입출력 4칸·FULL 캡션·한도 칩은 M 부터 붙는다."""
+    with _window() as window:
+        window.status = _sessions()
+        window.quota = _quota_windows()
+        window._rebuild_rows()
+
+        window._set_mode("M")
+        medium = window.height()
+        assert window._chip_h() == CHIP_H and window._quota_marks()
+
+        window._set_mode("S")
+        window.grab()
+        assert window._mode() == "S"
+        assert window._chip_h() == 0.0, "S 에는 한도 칩이 없다"
+        assert window.height() < medium
+        assert window.height() == int((PAD * 2 + overlay.METER_H_S + FOOT_H) * window.scale)
+        # 접혀 있어도 '얼마 썼고 몇 개가 기다리나' 는 답한다
+        assert "attention" in window._hit
+        assert not any(name.startswith("panel:") for name in window._hit)
+
+
+def test_meter_digits_stay_put_when_the_window_widens(_tmp: Path) -> None:
+    """큰 숫자의 오른쪽 끝은 S/M/L 어디서나 같은 자리다 — 곁눈질로 읽는 계기판이라서."""
+    anchors: Dict[str, float] = {}
+    widths: Dict[str, int] = {}
+    with _window() as window:
+        window.status = _sessions()
+        for mode in ("S", "M", "L"):
+            window._set_mode(mode)
+            window.grab()
+            s = window.scale
+            inner = window.width() - 2 * PAD * s
+            box_w = max(120 * s, inner - overlay.SIDE_W * s - overlay.SIDE_GAP * s)
+            anchors[mode] = PAD * s + min(box_w, overlay.DIGIT_W * s) - 8 * s
+            widths[mode] = window.width()
+        assert len(set(round(v, 3) for v in anchors.values())) == 1, anchors
+        assert widths["L"] > widths["M"], "L 은 실제로 더 넓은 창이다"
+
+
+def test_mode_buttons_do_not_share_hit_areas(_tmp: Path) -> None:
+    """MODE_BTN < MIN_HIT 이면 _sync_controls 가 히트박스를 키워 이웃과 겹친다."""
+    assert overlay.MODE_BTN >= overlay.MIN_HIT
+    with _window() as window:
+        window.grab()
+        _app().processEvents()
+        names = ["mode:S", "mode:M", "mode:L", "menu", "close"]
+        rects = [window._controls[name].geometry() for name in names]
+        for (left_name, left), (right_name, right) in zip(
+            zip(names, rects), zip(names[1:], rects[1:])
+        ):
+            assert left.right() < right.left(), f"{left_name} 와 {right_name} 가 겹친다"
+
+
+def test_table_cells_never_hard_clip(_tmp: Path) -> None:
+    """모든 표 셀은 칸을 넘으면 '…' 로 줄어든다 — 잘린 글자는 다른 값으로 읽힌다."""
+    with _window() as window:
+        window.status = _sessions()
+        window.quota = _quota_windows()
+        window.session_filter = "all"
+        for mode in ("M", "L"):
+            window._set_mode(mode)
+            for panel in window._visible_panels():
+                window.panel = panel
+                window._rebuild_rows()
+                assert not window.grab().isNull(), f"{mode}/{panel}"
+
+        # 긴 라벨이 들어와도 elide 가 걸려 폭 안에서 끝난다
+        metrics = _metrics(window, 8.5)
+        long_label = "GPT-5.3-high 주간"
+        shown = metrics.elidedText(long_label, Qt.TextElideMode.ElideRight, 40.0)
+        assert shown != long_label and metrics.horizontalAdvance(shown) <= 40.0
+
+
+def test_wide_session_table_fits_every_column(_tmp: Path) -> None:
+    """L 세션 표 7칸이 실제 폭 안에 들어오는지 — 컨텍스트가 시각 칸을 먹으면 안 된다."""
+    assert len(overlay.SESSION_COLS_WIDE) == len(overlay.SESSION_HEAD_WIDE) == 7
+    assert len(overlay.SESSION_COLS) == len(overlay.SESSION_HEAD) == 5
+    for columns in (overlay.SESSION_COLS, overlay.SESSION_COLS_WIDE):
+        for (start, end, _right, _size), (next_start, *_rest) in zip(columns, columns[1:]):
+            assert end <= next_start, "칸이 서로 겹친다"
+        assert columns[0][0] == 0.0 and columns[-1][1] == 1.0
+
+    with _window() as window:
+        window._set_mode("L")
+        window.status = _sessions()
+        window.session_filter = "all"
+        window._rebuild_rows()
+        window.grab()
+        width = window.width() - 2 * PAD * window.scale
+        # (칸 index, 넣어볼 최악의 값, 글자 크기). 모델은 short_model/short_effort 를
+        # 거친 뒤의 실제 최댓값을 쓴다 — 칸 안에 들어와야 elide 가 안 걸린다.
+        worst = [(0, "확인", 8.0), (2, "gpt-5.6-sol · med", 8.0), (3, "412/s", 8.5),
+                 (4, "9.7M", 8.0), (5, "100% · 높음", 8.0), (6, "08-16 00:11", 7.5)]
+        for index, text, size in worst:
+            start, end, _right, _size = overlay.SESSION_COLS_WIDE[index]
+            room = (end - start) * width - overlay.CELL_PAD * window.scale
+            assert _metrics(window, size, True, mono=True).horizontalAdvance(text) <= room, (
+                f"{text!r} 가 {index}번 칸({room:.0f}px)을 넘는다"
+            )
+
+
+def test_graph_peak_label_stays_inside_the_plot(_tmp: Path) -> None:
+    """첫 막대가 최고점이면 라벨이 패딩 밖으로 나가 '$5.82' 가 '5.82' 로 잘렸다."""
+    with _window() as window:
+        left, width = 12.0, 300.0
+        label_w = _metrics(window, 7, mono=True).horizontalAdvance("$5.82")
+        for bar_x in (left, left + width - 10.0):
+            placed = overlay._clamp(bar_x + (10.0 - label_w) / 2.0, left, left + width - label_w)
+            assert left <= placed <= left + width - label_w, bar_x
+
+
+def test_project_name_is_the_same_in_sessions_and_projects(_tmp: Path) -> None:
+    """집계 키와 표시 이름이 같은 규칙을 쓴다 — 두 패널이 다른 이름을 보이면 안 된다."""
+    now = time.time()
+    cwd = "/Users/nilk/dev/oct7/token-pet"
+    key = project_key(cwd)
+    assert key == "oct7/token-pet"
+    with _window() as window:
+        window.status = {
+            "sessions": {"svc/a": {"project": key, "cwd": cwd, "last_seen": now,
+                                   "totals": {"output_tokens": 5}}},
+            "projects": {key: {"last_seen": now, "totals": {"output_tokens": 5}},
+                         "(unknown)": {"last_seen": now - 1, "totals": {"output_tokens": 3}}},
+            "live": [], "live_count": 0,
+        }
+        window.session_filter = "all"
+        window.panel = "sessions"
+        session_rows, _note = window._build_rows()
+        window.panel = "projects"
+        project_rows, _note = window._build_rows()
+
+        assert session_rows[0][2] == key
+        assert project_rows[0][0] == key, project_rows
+        assert project_rows[1][0] == UNKNOWN_PROJECT, "(unknown) 은 사람 말로 보여준다"
+
+
+def test_saved_panel_falls_back_when_the_mode_hides_it(_tmp: Path) -> None:
+    """L 에서 '일별' 을 보다 M 으로 접으면 탭 줄과 표가 어긋나면 안 된다."""
+    with _window() as window:
+        window.status = _sessions()
+        window._set_mode("L")
+        window._set_panel("days")
+        assert window.panel == "days"
+
+        window._set_mode("M")
+        assert window.panel in window._visible_panels()
+        assert window.panel == "sessions"
+
+        # 반대로 M 에서 '일별' 을 고르면 막다른 길 대신 상세가 열린다
+        window._set_panel("days")
+        assert window.panel == "days" and window.expanded
+        assert "days" in window._visible_panels()
+        targets = {item["target"] for item in window._palette_catalog()}
+        assert {"panel:rates", "panel:days"} <= targets
 
 
 def main() -> int:

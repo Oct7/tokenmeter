@@ -32,8 +32,8 @@ from .leaderboard import tokens_of as _tokens_of
 from .meter import ATTENTION_LABELS, ATTENTION_ORDER, attention_counts, session_views
 from .rates import RATE_SPAN_TITLES, RATE_SPANS, RateSeries, load_rates, rate_series, rate_summary
 from .views import (
-    SESSION_FILTER_TITLES, SESSION_FILTERS, check_reason, cost_caption,
-    ctx_status_caption, filter_sessions, health_note,
+    LEGACY_UNKNOWN, SESSION_FILTER_TITLES, SESSION_FILTERS, UNKNOWN_PROJECT,
+    check_reason, cost_caption, ctx_status_caption, filter_sessions, health_note,
     money_caption, project_label, wait_caption,
 )
 
@@ -62,9 +62,17 @@ BASE_W = 340
 HEADER_H = 28
 SEARCH_H = 38
 METER_H = 128               # 상단 조작부를 포함한 택시 미터형 TokenMeter 계기판
+# S(심플)는 계기판 그 자체만 남긴다 — 숫자 · 게이지 · 요약 한 줄.
+# 입출력 4칸 · FULL/OUTPUT FLOW 캡션 · 한도 칩은 M 부터 붙는다.
+METER_H_S = 108
 ROW_H = 28
 FOOT_H = 22
 PAD = 12
+SIDE_W = 88.0               # 계기 박스 오른쪽 — 상태 배지와 API 환산 금액
+SIDE_GAP = 7.0
+# 큰 숫자가 오른쪽 정렬될 폭. 베젤은 남는 폭을 다 쓰되 숫자의 오른쪽 끝은 기본 창
+# 기준 자리에 못 박는다 — S/M/L 을 오갈 때 숫자가 좌우로 튀면 계기판으로 안 읽힌다.
+DIGIT_W = BASE_W - PAD * 2 - SIDE_W - SIDE_GAP
 HEAD_H = 24                 # 직접 전환하는 패널 탭
 FILTER_H = 24
 # tok/s = 로그에서 관측한 **출력 토큰 델타의 처리량**. 실제 스트리밍 생성 시간은 로그에
@@ -78,6 +86,8 @@ PREFS_NAME = "overlay.json"
 
 # TokenMeter의 주 탐색은 보이는 패널 탭이다. 검색은 키보드 보조 경로로만 둔다.
 PANELS = ("sessions", "projects", "quota", "rates", "days", "board")  # 첫 항목이 기본 패널
+# M(보통)은 평소 볼 것만 — 탭이 6개면 라벨이 붙어 읽히지도, 골라지지도 않는다.
+BASIC_PANELS = ("sessions", "projects", "quota")
 PANEL_TITLES = {
     "board": "팀", "days": "일별", "sessions": "세션", "projects": "프로젝트",
     "rates": "속도", "quota": "한도",
@@ -92,16 +102,25 @@ ProjectRow = Tuple[str, int, float]      # (프로젝트, 측정 토큰, 마지�
 SessionRow = Tuple[str, str, str, str, str, float, str, bool, str, int, float, bool, float]
 WHEEL_LINE = 60.0           # 목록 한 줄을 넘기는 휠 델타 (한 칸=120 → 두 줄)
 # 세션 표 칸 — 상태/프로젝트/속도/누적/컨텍스트는 항상 같은 위치에 둔다.
-SESSION_COLS = ((0.00, 0.16, False, 8.0), (0.16, 0.52, False, 9.0),
-                (0.52, 0.68, True, 8.5), (0.68, 0.84, True, 8.0),
-                (0.84, 1.00, True, 7.5))
-SESSION_COLS_WIDE = ((0.00, 0.09, False, 8.0), (0.09, 0.29, False, 9.0),
-                     (0.29, 0.45, False, 8.0), (0.45, 0.56, True, 8.5),
-                     (0.56, 0.66, True, 8.0), (0.66, 0.79, True, 8.0),
-                     (0.79, 0.94, False, 7.5), (0.94, 1.00, False, 7.5))
+# 컨텍스트 칸은 '95% · 높음' 이 들어갈 만큼 넓어야 옆 칸을 침범하지 않는다.
+SESSION_COLS = ((0.00, 0.15, False, 8.0), (0.15, 0.49, False, 9.0),
+                (0.49, 0.65, True, 8.5), (0.65, 0.79, True, 8.0),
+                (0.79, 1.00, True, 7.5))
+# 넓은 표는 7칸. 추론 강도는 모델 칸에 'opus-5 · xhi' 로 합쳐 칸 하나를 줄였다 —
+# 8칸이면 510px 에서 컨텍스트가 시각 칸을 넘어간다.
+SESSION_COLS_WIDE = ((0.00, 0.07, False, 8.0), (0.07, 0.32, False, 9.0),
+                     (0.32, 0.57, False, 8.0), (0.57, 0.65, True, 8.5),
+                     (0.65, 0.72, True, 8.0), (0.72, 0.85, True, 8.0),
+                     (0.85, 1.00, True, 7.5))
 CELL_PAD = 4.0
 SESSION_HEAD = ("상태", "프로젝트", "메인/s", "누적", "컨텍스트")
-SESSION_HEAD_WIDE = ("상태", "프로젝트", "모델", "메인/s", "누적", "컨텍스트", "시각", "추론")
+SESSION_HEAD_WIDE = ("상태", "프로젝트", "모델", "메인/s", "누적", "컨텍스트", "시각")
+# 한도 표 — 칸 이름과 값이 한 정의를 공유한다. 따로 두면 한쪽만 고쳐 어긋난다.
+# 기간은 'GPT-5.3-high 주간' 같은 긴 이름이 들어와서 가장 넓게 잡는다.
+QUOTA_COLS = ((0.00, 0.27, False, 8.5), (0.27, 0.55, False, 8.5),
+              (0.55, 0.67, True, 8.5), (0.67, 0.87, True, 8.5),
+              (0.87, 1.00, True, 8.5))
+QUOTA_HEAD = ("서비스", "기간", "사용", "페이스", "리셋")
 DETAIL_H = 44.0
 CARD_H = 32.0
 COLHEAD_H = 16              # 칸 이름 한 줄 높이
@@ -112,8 +131,10 @@ MINI_W, MINI_H = 0.62, 30.0
 MINI_RATE_W = 60.0
 # 화면에 보이는 직접 조작 — S(미터) · M(패널) · L(상세)
 MODES = ("S", "M", "L")
-MODE_BTN = 24.0
 MIN_HIT = 28.0
+# MIN_HIT 보다 작으면 _sync_controls 가 히트박스를 키워 이웃 버튼과 겹친다 (S 를 눌러도
+# 오늘/누적이 잡힌다). 그린 자리와 누르는 자리를 같게 두려면 최소 크기와 같아야 한다.
+MODE_BTN = MIN_HIT
 HINT = "오늘/누적 · S/M/L · ⋯ 메뉴"
 HINT_SEC = 20.0
 
@@ -564,8 +585,6 @@ class MeterWindow(QWidget):
         self.on_top = bool(prefs.get("on_top", True))
         self.scope = prefs.get("scope") if prefs.get("scope") in ("today", "total") else "today"
         self.panel = prefs.get("panel") if prefs.get("panel") in PANELS else PANELS[0]
-        if self.panel == "board" and not getattr(self.board, "online", False):
-            self.panel = "sessions"
         self.expanded = bool(prefs.get("expanded", False))
         self.span = prefs.get("span") if prefs.get("span") in SPANS else SPANS[0]
         self.rate_span = prefs.get("rate_span") if prefs.get("rate_span") in RATE_SPANS else "1h"
@@ -647,6 +666,7 @@ class MeterWindow(QWidget):
 
         self._drag: Optional["QPoint"] = None
 
+        self._ensure_panel()  # 저장된 탭이 지금 모드에 없을 수 있다 (L 에서 끄고 M 으로 시작)
         self._refresh_state()
         self._setup_tray()
         self.sync_finished.connect(self._sync_done)
@@ -672,11 +692,27 @@ class MeterWindow(QWidget):
             return 0
         return min(self._cap(self.panel), max(1, len(self.rows)))
 
-    def _visible_panels(self) -> Tuple[str, ...]:
-        """팀 기능은 endpoint가 설정된 경우에만 기본 탐색에 노출한다."""
+    def _panel_choices(self) -> Tuple[str, ...]:
+        """고를 수 있는 모든 패널 (검색·메뉴). 탭 줄보다 넓다 — 막다른 길을 만들지 않는다."""
         return PANELS if getattr(self.board, "online", False) else tuple(
             panel for panel in PANELS if panel != "board"
         )
+
+    def _visible_panels(self) -> Tuple[str, ...]:
+        """탭 줄 — M(보통)은 평소 볼 것만, L(상세)은 전부."""
+        choices = self._panel_choices()
+        return choices if self.expanded else tuple(
+            panel for panel in choices if panel in BASIC_PANELS
+        )
+
+    def _ensure_panel(self) -> None:
+        """모드가 바뀌어 지금 패널이 탭에서 사라졌으면 첫 탭으로 되돌린다.
+
+        안 하면 탭 줄에는 '세션' 이 켜져 보이는데 아래는 일별 표가 깔린다.
+        """
+        panels = self._visible_panels()
+        if self.panel not in panels:
+            self.panel, self.scroll, self.open_key = panels[0], 0, ""
 
     def _shows_graph(self) -> bool:
         return self.expanded and self.panel in ("rates", "days")
@@ -704,7 +740,8 @@ class MeterWindow(QWidget):
         else:
             extra = 0
         head = HEAD_H + SPACE_1 + extra + (SPACE_1 if self.panel == "sessions" else 0)
-        h = (PAD * 2 + METER_H + self._chip_h()
+        meter_h = METER_H_S if self._mode() == "S" else METER_H
+        h = (PAD * 2 + meter_h + self._chip_h()
              + (head + rows * ROW_H + 8 if rows else 0) + FOOT_H)
         w = BASE_W * (EXPAND_W if self.expanded else 1.0)
         if self._shows_graph():
@@ -859,7 +896,8 @@ class MeterWindow(QWidget):
         )
 
     def _chip_h(self) -> float:
-        return CHIP_H if self._quota_marks() else 0.0
+        """한도 칩은 M 부터. S 는 계기판만 남긴다."""
+        return CHIP_H if self.rows_on and self._quota_marks() else 0.0
 
     def _maybe_quota(self) -> None:
         from .quota import due, load, refresh
@@ -941,11 +979,11 @@ class MeterWindow(QWidget):
                 continue
             measured = _tokens_of(node.get("totals"))
             if measured > 0:
-                rows.append((str(name), measured, _float(node.get("last_seen"))))
+                rows.append((project_label(name), measured, _float(node.get("last_seen"))))
         rows.sort(key=lambda row: (-row[2], row[0]))
         total = sum(row[1] for row in rows)
         if not rows:
-            return [], "측정된 프로젝트 토큰 없음"
+            return [], "아직 측정된 폴더 없음 — 프로젝트는 에이전트를 실행한 폴더입니다"
         cap = self._cap("projects")
         self.scroll = max(0, min(self.scroll, len(rows) - cap))
         visible = rows[self.scroll:self.scroll + cap]
@@ -997,9 +1035,9 @@ class MeterWindow(QWidget):
             ))
         if not rows:
             empty = {
-                "live": "LIVE 세션 없음",
-                "archive": "ARCHIVE 세션 없음",
-            }.get(self.session_filter, "기록된 세션 없음")
+                "live": "LIVE 세션 없음 — 세션은 에이전트 대화 하나입니다",
+                "archive": "ARCHIVE 세션 없음 — 1시간 넘게 조용하면 여기로 옵니다",
+            }.get(self.session_filter, "기록된 세션 없음 — 세션은 에이전트 대화 하나입니다")
             return [], empty
         more = f" · {self.scroll + len(rows)}/{len(views)}" if len(views) > cap else ""
         return rows, (f"세션 {len(views)}개 · 라이브 "
@@ -1047,11 +1085,13 @@ class MeterWindow(QWidget):
             "board": ("팀", "공유 상태와 사용량"),
         }
         items: List[Dict[str, Any]] = []
-        for index, panel in enumerate(self._visible_panels()):
+        visible = self._visible_panels()
+        for index, panel in enumerate(self._panel_choices()):
             title, subtitle = panel_copy[panel]
+            tag = "현재" if panel == self.panel else ("보기" if panel in visible else "상세")
             items.append({
                 "target": f"panel:{panel}", "title": title, "subtitle": subtitle,
-                "tag": "현재" if panel == self.panel else "보기", "order": 20 + index,
+                "tag": tag, "order": 20 + index,
                 "keywords": f"{panel} {PANEL_TITLES[panel]}",
             })
         items.extend([
@@ -1215,9 +1255,20 @@ class MeterWindow(QWidget):
         self._painter.setFont(self._font)
 
     def _text(self, x: float, y: float, w: float, h: float, s: str,
-              color: Optional[str] = None, right: bool = False, alpha: int = 255) -> None:
+              color: Optional[str] = None, right: bool = False, alpha: int = 255,
+              elide: bool = False, center: bool = False) -> None:
+        """칸 안에 글자를 쓴다.
+
+        elide=True 면 칸을 넘는 글자를 '…' 로 줄인다. Qt 의 기본 동작은 하드 클립이라
+        마지막 글자가 반쯤 잘려 다른 값처럼 읽힌다 (`GPT-5.3-h` / `Fable 주`).
+        """
+        if elide and s:
+            s = QFontMetricsF(self._font).elidedText(
+                s, Qt.TextElideMode.ElideRight, max(0.0, w),
+            )
         self._painter.setPen(_c(color or self.colors["text_primary"], alpha))
-        align = Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft
+        align = (Qt.AlignmentFlag.AlignRight if right else
+                 Qt.AlignmentFlag.AlignHCenter if center else Qt.AlignmentFlag.AlignLeft)
         self._painter.drawText(QRectF(x, y, w, h), align | Qt.AlignmentFlag.AlignVCenter, s)
 
     def _control_caption(self, name: str) -> str:
@@ -1428,7 +1479,9 @@ class MeterWindow(QWidget):
                 self._f(7.5)
                 hint = self.hint_until > 0.0
                 sick = self.state_error or health_note(self.status, time.time())
-                foot = HINT if hint else (sick or self._feedback or self.note)
+                # S 는 계기판 요약 줄이 이미 상태를 말한다 — 목록 요약까지 반복하지 않는다
+                note = self.note if self.rows_on else ""
+                foot = HINT if hint else (sick or self._feedback or note)
                 if hint:
                     lead = "오늘/누적 · "
                     self._f(7.5)
@@ -1540,6 +1593,7 @@ class MeterWindow(QWidget):
     def _draw_meter(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
         y0 = y
+        simple = self._mode() == "S"
         tot = self._scoped()
 
         # TokenMeter의 핵심 조작은 숨기지 않는다: 범위, S/M/L, 메뉴, 닫기.
@@ -1549,51 +1603,58 @@ class MeterWindow(QWidget):
         bar = MODE_BTN * s * (len(MODES) + 2)
         label = "오늘" if self.scope == "today" else "누적"
         lw = 40 * s
-        self._text(x, y, w - bar - 4 * s, MODE_BTN * s, label,
+        self._text(x, y, w - bar - SPACE_1 * s, MODE_BTN * s, label,
                    self.colors["tint"], right=True)
-        self._hit["scope"] = (x + w - bar - lw, y, lw, MODE_BTN * s)
+        self._hit["scope"] = (x + w - bar - lw - SPACE_1 * s, y, lw, MODE_BTN * s)
         self._draw_modes(x + w - bar, y)
 
         # 숫자가 절대 다른 상태에 밀려나지 않는 산업용 택시 미터 베젤.
+        # 베젤은 남는 폭을 다 쓰되 숫자는 DIGIT_W 오른쪽 끝에 못 박는다 — 창이 넓어질 때
+        # 숫자까지 따라 움직이면 곁눈질로 같은 자리를 읽을 수 없다.
         display_y, display_h = y0 + 27 * s, 43 * s
-        side_w, gap = 88 * s, 7 * s
-        digit_w = max(120 * s, w - side_w - gap)
+        gap = SIDE_GAP * s
+        badge_w = SIDE_W * s
+        box_w = max(120 * s, w - badge_w - gap)
+        digit_w = min(box_w, DIGIT_W * s)
+        badge_x = x + w - badge_w
         pulse_alpha = int(90 + 110 * self.pulse) if self.rate > 0 else 42
-        p.fillRect(QRectF(x, display_y, digit_w, display_h),
+        p.fillRect(QRectF(x, display_y, box_w, display_h),
                    _c(self.colors["background_primary"], 255))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(_c(self.colors["tint"], pulse_alpha))
         p.drawRect(QRectF(x + 0.5 * s, display_y + 0.5 * s,
-                          digit_w - s, display_h - s))
+                          box_w - s, display_h - s))
         p.fillRect(QRectF(x, display_y, 2 * s, display_h),
                    _c(self.colors["tint"], pulse_alpha))
 
         rate = f"{self.rate:,.1f}"
         self._f(7.0, True, mono=True)
-        self._text(x + 8 * s, display_y + 3 * s, digit_w - 16 * s, 10 * s,
-                   "OUTPUT · TOKENS / SEC", self.colors["tint"], alpha=190)
+        self._text(x + 8 * s, display_y + 3 * s, box_w - 16 * s, 10 * s,
+                   "OUTPUT · TOKENS / SEC", self.colors["tint"], alpha=190, elide=True)
         self._f(25.5, True, mono=True)
         self._text(x + 8 * s, display_y + 9 * s, digit_w - 16 * s, 31 * s, rate,
                    self.colors["text_primary"] if self.rate > 0 else self.colors["text_tertiary"],
                    right=True)
 
-        side_x = x + digit_w + gap
+        # 상태 배지는 폭이 고정이고 늘 오른쪽 끝에 붙는다.
+        badge_y = display_y + (display_h - 19 * s) / 2.0 if simple else display_y
         state_color = self.colors["destructive"] if counts["check"] else (
             self.colors["success"] if self.rate > 0 else self.colors["text_tertiary"]
         )
-        p.fillRect(QRectF(side_x, display_y, side_w, 19 * s), _c(state_color, 28))
+        p.fillRect(QRectF(badge_x, badge_y, badge_w, 19 * s), _c(state_color, 28))
         self._f(8.5, True, mono=True)
         state = f"확인 {counts['check']}" if counts["check"] else ("RUN" if self.rate > 0 else "IDLE")
-        self._text(side_x + 6 * s, display_y, side_w - 12 * s, 19 * s, state, state_color)
-        if counts["check"]:
-            self._hit["attention"] = (side_x, display_y, side_w, 19 * s)
-        self._f(7.5, True, mono=True)
-        self._text(side_x, display_y + 20 * s, side_w, 10 * s, "API VALUE",
-                   self.colors["text_tertiary"], right=True)
-        self._f(8.5, True, mono=True)
-        self._text(side_x, display_y + 29 * s, side_w, 13 * s,
-                   money_caption(self._approx(), tot.get("cost_usd")),
-                   self.colors["text_secondary"], right=True)
+        self._text(badge_x, badge_y, badge_w, 19 * s, state, state_color, center=True)
+        if counts["check"] and not simple:  # S 는 아래 요약 줄이 같은 곳으로 데려간다
+            self._hit["attention"] = (badge_x, badge_y, badge_w, 19 * s)
+        if not simple:
+            self._f(7.5, True, mono=True)
+            self._text(badge_x, display_y + 20 * s, badge_w, 10 * s, "API VALUE",
+                       self.colors["text_tertiary"], right=True)
+            self._f(8.5, True, mono=True)
+            self._text(badge_x, display_y + 29 * s, badge_w, 13 * s,
+                       money_caption(self._approx(), tot.get("cost_usd")),
+                       self.colors["text_secondary"], right=True, elide=True)
 
         # 세그먼트 게이지가 TokenMeter의 고유한 glanceable identity다.
         y = y0 + 76 * s
@@ -1609,6 +1670,10 @@ class MeterWindow(QWidget):
             px = x + _clamp(self.peak, 0.0, 1.0) * w - 1.5 * s
             p.fillRect(QRectF(px, y - 2 * s, 1.6 * s, bar_h + 4 * s),
                        _c(self.colors["text_primary"], 150))
+
+        if simple:
+            self._draw_meter_summary(x, y0 + 92 * s, w, counts, tot)
+            return y0 + METER_H_S * s
 
         self._f(6.5, True, mono=True)
         self._text(x, y0 + 89 * s, w, 10 * s, "OUTPUT FLOW",
@@ -1633,12 +1698,37 @@ class MeterWindow(QWidget):
             label_w = QFontMetricsF(self._font).horizontalAdvance(label)
             self._f(7.5, True, mono=True)
             self._text(cell_x + label_w, y, cw - 3 * s - label_w, 15 * s, val,
-                       self._kind_color(kind) if i < 3 else self.colors["text_secondary"])
+                       self._kind_color(kind) if i < 3 else self.colors["text_secondary"],
+                       elide=True)
 
         return y0 + METER_H * s
 
+    def _draw_meter_summary(
+        self, x: float, y: float, w: float, counts: Dict[str, int], tot: Dict[str, Any],
+    ) -> None:
+        """S(심플)의 유일한 보조 줄 — 비용은 왼쪽, 세션 상태는 오른쪽.
+
+        패널을 접은 상태에서도 '얼마 썼고 지금 몇 개가 나를 기다리나' 는 답해야 한다.
+        오른쪽을 누르면 확인 세션 목록으로 간다 (접힌 배지가 하던 역할).
+        """
+        h = 16.0 * self.scale
+        scope = "오늘" if self.scope == "today" else "누적"
+        self._f(8.5, True, mono=True)
+        self._text(x, y, w * 0.46, h, f"{scope} {money_caption(self._approx(), tot.get('cost_usd'))}",
+                   self.colors["text_secondary"], elide=True)
+        bits = [f"{ATTENTION_LABELS[name]} {counts[name]}"
+                for name in ("check", "working", "waiting") if counts.get(name)]
+        color = self.colors["destructive"] if counts["check"] else (
+            self.colors["success"] if counts["working"] else self.colors["text_tertiary"]
+        )
+        self._f(8.5, True)
+        self._text(x + w * 0.46, y, w * 0.54, h, " · ".join(bits) or "라이브 세션 없음",
+                   color, right=True, elide=True)
+        if bits:
+            self._hit["attention"] = (x + w * 0.46, y, w * 0.54, h)
+
     def _draw_chips(self, x: float, y: float, w: float) -> float:
-        marks = self._quota_marks()
+        marks = self._quota_marks() if self.rows_on else []  # S 는 계기판만
         if not marks:
             return y
         s = self.scale
@@ -1650,7 +1740,7 @@ class MeterWindow(QWidget):
                     self.colors["success"] if status == "underused" else self.colors["text_tertiary"]
                 )
             )
-            self._text(x + i * cw, y, cw, CHIP_H * s, text, color)
+            self._text(x + i * cw, y, cw, CHIP_H * s, text, color, center=True, elide=True)
             self._hit[f"chip:{i}"] = (x + i * cw, y, cw, CHIP_H * s)
         return y + CHIP_H * s
 
@@ -1665,16 +1755,17 @@ class MeterWindow(QWidget):
             p.fillRect(QRectF(bx, y, bw - 2 * s, h),
                        _c(self.colors["tint"] if selected else self.colors["surface_hover"],
                           30 if selected else 12))
-            self._text(bx + 4.5 * s, y, bw, h, name,
-                       self.colors["tint"] if selected else self.colors["text_tertiary"])
+            self._text(bx, y, bw - 2 * s, h, name,
+                       self.colors["tint"] if selected else self.colors["text_tertiary"],
+                       center=True)
             self._hit[f"mode:{name}"] = (bx, y, bw, h)
         bx = x + len(MODES) * bw
         self._f(10, True)
-        self._text(bx + 3 * s, y, bw, h, "⋯", self.colors["text_tertiary"])
+        self._text(bx, y, bw, h, "⋯", self.colors["text_tertiary"], center=True)
         self._hit["menu"] = (bx, y, bw, h)
         bx += bw
         self._f(9, True)
-        self._text(bx + 3.5 * s, y, bw, h, "×", self.colors["text_tertiary"])
+        self._text(bx, y, bw, h, "×", self.colors["text_tertiary"], center=True)
         self._hit["close"] = (bx, y, bw, h)
 
     def _draw_mini(self, x: float, y: float, w: float) -> None:
@@ -1729,13 +1820,29 @@ class MeterWindow(QWidget):
         return y + CARD_H * s
 
     # ── 히스토리 그래프 ──────────────────────────────────────────────────
+    def _label_over_bar(
+        self, bar_x: float, y: float, bar_w: float, left: float, width: float, text: str,
+    ) -> None:
+        """막대 위 숫자를 그린다. 그래프 폭을 벗어나지 않게 끝에서 붙잡는다.
+
+        첫 막대나 마지막 막대가 최고점이면 라벨이 패딩 밖으로 나가 '$5.82' 가
+        '5.82' 로 잘려 보인다 — 값이 통째로 달라 보이는 종류의 잘림이다.
+        """
+        label_w = QFontMetricsF(self._font).horizontalAdvance(text)
+        lx = _clamp(bar_x + (bar_w - label_w) / 2.0, left, left + max(0.0, width - label_w))
+        self._text(lx, y, label_w, 10 * self.scale, text)
+
     def _series(self) -> Series:
         """지금 화면에 그릴 시계열. 드릴다운이 걸려 있으면 거기에 맞춰 좁힌다."""
         hours = load_hours(self.status)
         kind, value = self.focus or ("", "")
         if kind == "day":
             return series(hours, "today", now=_day_noon(value))
-        return series(hours, self.span, project=value if kind == "project" else None)
+        if kind != "project":
+            return series(hours, self.span)
+        # focus 는 화면에 보이는 이름이다. 시간 버킷의 키는 옛 기록에서 '(unknown)' 일 수 있다.
+        return series(hours, self.span,
+                      project=LEGACY_UNKNOWN if value == UNKNOWN_PROJECT else value)
 
     def _draw_graph(self, x: float, y: float, w: float) -> float:
         s, p = self.scale, self._painter
@@ -1782,7 +1889,7 @@ class MeterWindow(QWidget):
             p.fillRect(QRectF(bx, cy, bw - GRAPH_GAP * s, part), _c(self.colors["tint"], 190))
             if i == tallest:  # 최고점에만 숫자를 붙인다 — 칸마다 쓰면 뭉개진다
                 self._f(7, mono=True)
-                self._text(bx - bw, cy - 10 * s, bw * 3, 10 * s, _money_short(bar.total))
+                self._label_over_bar(bx, cy - 10 * s, bw, x, w, _money_short(bar.total))
 
         # 축 라벨 — 칸마다 쓰면 뭉개진다. 4칸에 하나씩만.
         y += bh + 1 * s
@@ -1824,8 +1931,7 @@ class MeterWindow(QWidget):
                        _c(self._kind_color("output"), 200))
             if i == tallest:
                 self._f(7, mono=True)
-                self._text(bx - bw, y + bh - part - 10 * s, bw * 3, 10 * s,
-                           f"{bar.rate:.0f}")
+                self._label_over_bar(bx, y + bh - part - 10 * s, bw, x, w, f"{bar.rate:.0f}")
         y += bh + 1 * s
         self._f(7.0, mono=True)
         step = max(1, len(data.bars) // 8)
@@ -1845,7 +1951,7 @@ class MeterWindow(QWidget):
                                    _c(self.colors["tint"] if on else self.colors["surface_hover"],
                                       30 if on else 12))
             self._text(bx, y, RATE_BTN_W * s - 2 * s, BTN_H * s, RATE_SPAN_TITLES[name],
-                       self.colors["tint"] if on else self.colors["text_tertiary"])
+                       self.colors["tint"] if on else self.colors["text_tertiary"], center=True)
             self._hit[f"rate:{name}"] = (bx, y, RATE_BTN_W * s - 2 * s, BTN_H * s)
 
     def _draw_spans(self, x: float, y: float, disabled: bool = False) -> None:
@@ -1860,7 +1966,7 @@ class MeterWindow(QWidget):
                                 30 if on else 12))
             self._text(bx, y, BTN_W * s - 2 * s, BTN_H * s, SPAN_TITLES[name],
                        self.colors["tint"] if on else self.colors["text_tertiary"],
-                       alpha=90 if disabled else 255)
+                       alpha=90 if disabled else 255, center=True)
             self._hit[f"span:{name}"] = (bx, y, BTN_W * s - 2 * s, BTN_H * s)
 
     def _draw_rows(self, x: float, y: float, w: float) -> float:
@@ -1874,11 +1980,14 @@ class MeterWindow(QWidget):
         for i, name in enumerate(panels):
             bx = x + i * tab_w
             selected = name == self.panel
-            self._text(bx, y, tab_w, HEAD_H * s, PANEL_TITLES[name],
-                       self.colors["tint"] if selected else self.colors["text_tertiary"])
-            if selected:
-                p.fillRect(QRectF(bx, y + (HEAD_H - 2) * s,
-                                  min(24 * s, tab_w - 8 * s), 2 * s),
+            title = PANEL_TITLES[name]
+            self._text(bx, y, tab_w, HEAD_H * s, title,
+                       self.colors["tint"] if selected else self.colors["text_tertiary"],
+                       center=True, elide=True)
+            if selected:  # 밑줄은 라벨 폭에 맞춘다 — 고정 폭이면 라벨과 어긋나 보인다
+                mark_w = min(tab_w, QFontMetricsF(self._font).horizontalAdvance(title) + SPACE_2 * s)
+                p.fillRect(QRectF(bx + (tab_w - mark_w) / 2.0, y + (HEAD_H - 2) * s,
+                                  mark_w, 2 * s),
                            _c(self.colors["tint"]))
             self._hit[f"panel:{name}"] = (bx, y, tab_w, HEAD_H * s)
         y += (HEAD_H + SPACE_1) * s
@@ -1918,7 +2027,8 @@ class MeterWindow(QWidget):
                        self.colors["tint"] if i == 0 else self.colors["text_tertiary"])
             self._f(9.0, hot)
             self._text(x + (10 + mw) * s, ry, w * 0.38, h, label,
-                       self.colors["text_primary"] if hot else self.colors["text_secondary"])
+                       self.colors["text_primary"] if hot else self.colors["text_secondary"],
+                       elide=True)
             self._f(8.5, mono=True)
             self._text(x, ry, w - 58 * s, h, _fmt(tokens), self.colors["text_tertiary"], right=True)
             self._f(8.5, True, mono=True)
@@ -1939,7 +2049,8 @@ class MeterWindow(QWidget):
                    28 if selected else 10),
             )
             self._text(bx, y, width - 3 * s, FILTER_H * s, SESSION_FILTER_TITLES[name],
-                       self.colors["tint"] if selected else self.colors["text_tertiary"])
+                       self.colors["tint"] if selected else self.colors["text_tertiary"],
+                       center=True)
             self._hit[f"filter:{name}"] = (bx, y, width - 3 * s, FILTER_H * s)
         return y + (FILTER_H + SPACE_1) * s
 
@@ -1963,9 +2074,10 @@ class MeterWindow(QWidget):
                               w * 0.18 * _clamp(rate / top, 0.0, 1.0), 2 * s),
                        _c(self.colors["tint"]))
             self._f(8.5, True)
-            self._text(x + 6 * s, ry, w * 0.34, h, vendor)
+            self._text(x + 6 * s, ry, w * 0.34 - 6 * s, h, vendor, elide=True)
             self._f(8.5, mono=True)
-            self._text(x + w * 0.34, ry, w * 0.30, h, model, self.colors["text_secondary"])
+            self._text(x + w * 0.34, ry, w * 0.30, h, model,
+                       self.colors["text_secondary"], elide=True)
             self._text(x + w * 0.64, ry, w * 0.18 - 4 * s, h, _fmt(tokens),
                        self.colors["text_tertiary"], right=True)
             self._f(9.0, True, mono=True)
@@ -1996,11 +2108,9 @@ class MeterWindow(QWidget):
             if i == 0:
                 p.fillRect(QRectF(x, ry, 2 * s, h), _c(self.colors["tint"]))
             self._f(9.0, i == 0)
-            shown = QFontMetricsF(self._font).elidedText(
-                project, Qt.TextElideMode.ElideRight, w * 0.51,
-            )
-            self._text(x + 6 * s, ry, w * 0.52, h, shown,
-                       self.colors["text_primary"] if i == 0 else self.colors["text_secondary"])
+            self._text(x + 6 * s, ry, w * 0.54 - 12 * s, h, project,
+                       self.colors["text_primary"] if i == 0 else self.colors["text_secondary"],
+                       elide=True)
             self._f(7.5, mono=True)
             self._text(x + w * 0.54, ry, w * 0.23, h, _stamp(last_seen),
                        self.colors["text_tertiary"])
@@ -2009,8 +2119,8 @@ class MeterWindow(QWidget):
                        self.colors["tint"], right=True)
         if not rows:
             self._f(8)
-            self._text(x, y, w, ROW_H * s, "측정된 프로젝트 토큰이 없습니다",
-                       self.colors["text_tertiary"], alpha=150)
+            self._text(x, y, w, ROW_H * s, "에이전트를 실행한 폴더가 아직 없습니다",
+                       self.colors["text_tertiary"], alpha=150, elide=True)
         return y + max(1, len(rows)) * ROW_H * s + 6 * s
 
     def _draw_quota_rows(self, x: float, y: float, w: float, rows: List[Any]) -> float:
@@ -2022,14 +2132,10 @@ class MeterWindow(QWidget):
             window_key(row) for row in representative_windows(windows, self.quota_representatives)
         }
         self._f(7.5, True)
-        self._text(x, y, w * 0.30, COLHEAD_H * s, "서비스", self.colors["text_tertiary"], alpha=180)
-        self._text(x + w * 0.30, y, w * 0.16, COLHEAD_H * s, "기간", self.colors["text_tertiary"], alpha=180)
-        self._text(x + w * 0.46, y, w * 0.17 - 3 * s, COLHEAD_H * s,
-                   "사용", self.colors["text_tertiary"], right=True, alpha=180)
-        self._text(x + w * 0.63, y, w * 0.21 - 3 * s, COLHEAD_H * s,
-                   "페이스", self.colors["text_tertiary"], right=True, alpha=180)
-        self._text(x + w * 0.84, y, w * 0.16 - 6 * s, COLHEAD_H * s,
-                   "리셋", self.colors["text_tertiary"], right=True, alpha=180)
+        for name, (start, end, right, _size) in zip(QUOTA_HEAD, QUOTA_COLS):
+            self._text(x + start * w + CELL_PAD * s, y, (end - start) * w - CELL_PAD * s * 2,
+                       COLHEAD_H * s, name, self.colors["text_tertiary"],
+                       right=right, alpha=180)
         y += COLHEAD_H * s
         for i, (title, label, used, reset, status) in enumerate(rows):
             ry, h = y + i * ROW_H * s, (ROW_H - 3) * s
@@ -2048,20 +2154,22 @@ class MeterWindow(QWidget):
             color = self.colors["destructive"] if status == "exhausted" else (
                 self.colors["warning"] if status == "warn" else self.colors["text_primary"]
             )
-            self._f(8.5, True)
-            self._text(x + 6 * s, ry, w * 0.28, h, ("★ " if representative else "") + title, color)
-            self._f(8.5)
-            self._text(x + w * 0.30, ry, w * 0.16, h, label, self.colors["text_secondary"])
-            pct = f"{used * 100:.0f}%" if used >= 0 else "미상"
-            self._f(8.5, mono=True)
-            self._text(x + w * 0.46, ry, w * 0.17 - 3 * s, h, pct,
-                       self.colors["text_tertiary"], right=True)
-            self._text(x + w * 0.63, ry, w * 0.21 - 3 * s, h,
-                       f"여유 {gap * 100:.0f}%p" if underused else "—",
-                       self.colors["success"] if underused else self.colors["text_tertiary"],
-                       right=True)
-            self._text(x + w * 0.84, ry, w * 0.16 - 6 * s, h,
-                       reset or "미상", self.colors["text_tertiary"], right=True)
+            cells = [
+                (("★ " if representative else "") + title, color, True),
+                (label, self.colors["text_secondary"], False),
+                (f"{used * 100:.0f}%" if used >= 0 else "미상",
+                 self.colors["text_tertiary"], False),
+                (f"여유 {gap * 100:.0f}%p" if underused else "—",
+                 self.colors["success"] if underused else self.colors["text_tertiary"], False),
+                (reset or "미상", self.colors["text_tertiary"], False),
+            ]
+            for index, ((text, cell_color, bold), (start, end, right, size)) in enumerate(
+                zip(cells, QUOTA_COLS)
+            ):
+                self._f(size, bold, mono=index >= 2)
+                self._text(x + start * w + CELL_PAD * s, ry,
+                           (end - start) * w - CELL_PAD * s * 2, h, text, cell_color,
+                           right=right, elide=True)
             if can_represent(raw):
                 self._hit[f"row:{i}"] = (x, ry, w, ROW_H * s)
         if not rows:
@@ -2080,8 +2188,9 @@ class MeterWindow(QWidget):
             if me:
                 p.fillRect(QRectF(x, ry, 2.0 * s, h), _c(self.colors["warning"]))
             self._f(9.0, me)
-            self._text(x + 6 * s, ry, w * 0.34, h, handle,
-                       self.colors["text_primary"] if me else self.colors["text_secondary"])
+            self._text(x + 6 * s, ry, w * 0.34 - 6 * s, h, handle,
+                       self.colors["text_primary"] if me else self.colors["text_secondary"],
+                       elide=True)
             self._f(8.5, True)
             mark = f"확인 {check}" if check else f"작업 {working}"
             color = self.colors["destructive"] if check else (
@@ -2166,17 +2275,18 @@ class MeterWindow(QWidget):
             speed = _rate(rate) if rate >= 0.01 else "—"
             context = ctx_status_caption(ctx, has_window)
             if wide:
+                # 추론 강도는 칸을 따로 주기엔 짧다 — 모델 옆에 붙여 칸 하나를 아낀다
+                engine = f"{model or '미상'} · {effort}" if effort else (model or "미상")
                 cells = [
                     (ATTENTION_LABELS.get(attention, attention), state_color, True),
                     (project, self.colors["text_primary"] if live else self.colors["text_secondary"], live),
-                    (model or "미상", self.colors["text_secondary"], False),
+                    (engine, self.colors["text_secondary"], False),
                     (speed, self.colors["tint"] if rate >= 0.01 else self.colors["text_tertiary"],
                      rate >= 0.01),
                     (_fmt(tokens), self.colors["text_tertiary"], False),
                     (context, self._ctx_color(ctx) if has_window else self.colors["text_tertiary"],
                      ctx >= CTX_WARN),
                     (opened, self.colors["text_tertiary"], False),
-                    (effort or "—", self.colors["warning"], False),
                 ]
             else:
                 cells = [
@@ -2196,10 +2306,7 @@ class MeterWindow(QWidget):
                 self._f(size, bold, mono=index >= 2)
                 cell_x = x + start * w + CELL_PAD * s
                 cell_width = (end - start) * w - CELL_PAD * s
-                shown = QFontMetricsF(self._font).elidedText(
-                    text, Qt.TextElideMode.ElideRight, cell_width,
-                )
-                self._text(cell_x, ry, cell_width, h, shown, color, right=right)
+                self._text(cell_x, ry, cell_width, h, text, color, right=right, elide=True)
 
     # ── 상호작용 ─────────────────────────────────────────────────────────
     def _hit_test(self, pos: Any) -> str:
@@ -2291,7 +2398,7 @@ class MeterWindow(QWidget):
             rec = next((row for row in session_views(self.status)
                         if row["key"] == self.open_key), None)
             if rec is not None:
-                self.focus = ("project", str(rec.get("project") or ""))
+                self.focus = ("project", project_label(rec.get("project"), rec.get("cwd")))
                 self.panel, self.expanded, self.rows_on, self.open_key = "days", True, True, ""
                 self._rebuild_rows()
                 self._store_prefs()
@@ -2317,7 +2424,8 @@ class MeterWindow(QWidget):
             return
         if self.panel == "sessions":
             key = str(rows[index][0])
-            project = str(rows[index][2]).split("/")[-1]
+            # 행에 그려진 이름 그대로 쓴다 — 집계 키와 같은 규칙(project_key)이라 그냥 맞는다
+            project = str(rows[index][2])
             if self.open_key == key:
                 self.open_key = ""
                 self.focus = None
@@ -2401,6 +2509,7 @@ class MeterWindow(QWidget):
         self.expanded, self.rows_on = name == "L", name != "S"
         if not self.expanded:
             self.focus = None
+        self._ensure_panel()
         self._rebuild_rows()
         self._resize_to_content()
         self._store_prefs()
@@ -2411,6 +2520,7 @@ class MeterWindow(QWidget):
         self.expanded = not self.expanded
         if not self.expanded:
             self.focus = None
+        self._ensure_panel()
         self._rebuild_rows()
         self._resize_to_content()
         self._store_prefs()
@@ -2528,9 +2638,11 @@ class MeterWindow(QWidget):
 
         panels = menu.addMenu("콘텐츠")
         panels.setStyleSheet(self._menu_style())
-        for name in self._visible_panels():
+        visible = self._visible_panels()
+        for name in self._panel_choices():
             mark = "● " if name == self.panel else "   "
-            self._act(panels, mark + PANEL_TITLES[name], lambda _=False, n=name: self._set_panel(n))
+            label = PANEL_TITLES[name] + ("" if name in visible else "  (상세)")
+            self._act(panels, mark + label, lambda _=False, n=name: self._set_panel(n))
 
         filters = menu.addMenu("세션 필터")
         filters.setStyleSheet(self._menu_style())
@@ -2618,6 +2730,8 @@ class MeterWindow(QWidget):
         self.update()
 
     def _set_panel(self, name: str) -> None:
+        if name in self._panel_choices() and name not in self._visible_panels():
+            self.expanded = True  # 속도·일별·팀은 상세 전용 — 골랐으면 상세를 열어준다
         panels = self._visible_panels()
         self.panel = name if name in panels else panels[0]
         self.scroll = 0
@@ -2639,6 +2753,7 @@ class MeterWindow(QWidget):
 
     def _toggle_rows(self) -> None:
         self.rows_on = not self.rows_on
+        self._ensure_panel()
         self._resize_to_content()
         self._store_prefs()
         self.update()
@@ -3032,7 +3147,8 @@ def _demo() -> None:
                 if panel == "sessions":
                     extra = FILTER_H + COLHEAD_H
                 head = HEAD_H + extra
-                need = (PAD * 2 + METER_H + w._chip_h()
+                meter_h = METER_H_S if w._mode() == "S" else METER_H
+                need = (PAD * 2 + meter_h + w._chip_h()
                         + (head + n * ROW_H + SPACE_2 if n else 0) + FOOT_H) * scale
                 assert wh >= need - 1.0, (scale, panel, rows_on, wh, need)
                 assert not w.grab().isNull(), "paintEvent 가 죽지 않는지 실제로 한 번 그려본다"
@@ -3044,11 +3160,15 @@ def _demo() -> None:
     w._set_panel("없는패널")
     assert w.panel == w._visible_panels()[0], "모르는 이름이면 기본 패널로"
     w.rows_on = False  # 접어둔 상태에서 패널을 고르면 펼쳐진다 (아니면 메뉴가 먹통으로 보인다)
+    w._set_panel("projects")
+    assert w.rows_on and w.panel == "projects"
+    # 속도·일별은 상세 전용 탭이다 — 메뉴/검색에서 고르면 상세까지 같이 열어준다
+    w.expanded = False
     w._set_panel("days")
-    assert w.rows_on and w.panel == "days"
+    assert w.expanded and w.panel == "days" and "days" in w._visible_panels()
 
     # ── 확장(히스토리) 모드 ──
-    w.scale, w.rows_on, w.panel = 1.0, True, "sessions"
+    w.scale, w.rows_on, w.panel, w.expanded = 1.0, True, "sessions", False
     w._rebuild_rows()
     narrow = w._size()
     w._toggle_expand()

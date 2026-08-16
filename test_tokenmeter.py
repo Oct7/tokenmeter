@@ -34,6 +34,7 @@ from tokenmeter.leaderboard import Leaderboard, parse_entries, payload
 from tokenmeter.meter import DAYS_KEPT, Meter, TokenDelta
 from tokenmeter.overlay import visible_pos
 from tokenmeter.pricing import cost_usd, normalize_model
+from tokenmeter.views import UNKNOWN_PROJECT, project_key, project_label
 from tokenmeter.watcher import ServiceReader
 
 # ── 스펙 §1 의 실측 로그 샘플 ────────────────────────────────────────────────
@@ -402,7 +403,7 @@ def test_claude_jsonl(tmp: Path) -> None:
     delta = got[0]
     assert _vec(delta) == (2, 60955, 2161, 813), _vec(delta)
     assert delta.model == "claude-opus-5"
-    assert delta.project == "tokenmeter"
+    assert delta.project == "projects/tokenmeter", "프로젝트 키는 상위/leaf 다"
     assert delta.service == "claude-code"
     assert delta.session == "sess-claude-1", "세션 수 집계가 통째로 빠진다"
     assert delta.vendor == "anthropic"
@@ -445,7 +446,7 @@ def test_codex_cumulative(tmp: Path) -> None:
     assert delta.output_tokens == 384, "reasoning_output_tokens 를 더하면 안 된다"
     assert _vec(delta) == (16023, 34304, 0, 384)
     # cwd/model/session/vendor 는 다른 줄(session_meta / turn_context)에서 학습한다
-    assert delta.model == "gpt-5.6-sol" and delta.project == "tokenmeter"
+    assert delta.model == "gpt-5.6-sol" and delta.project == "projects/tokenmeter"
     assert delta.session == "sess-codex-1" and delta.vendor == "openai"
 
     # 두 번째 누적치 → 증가분만
@@ -484,7 +485,7 @@ def test_opencode_json(tmp: Path) -> None:
     assert reader.poll() == 1
     delta = got[0]
     assert _vec(delta) == (3265, 25344, 0, 88), _vec(delta)
-    assert delta.model == "nemotron-3-ultra-free" and delta.project == "dev"
+    assert delta.model == "nemotron-3-ultra-free" and delta.project == "Users/dev"
     # 벤더는 게이트웨이(providerID)를 쓴다 — 모델명(nvidia)이 아니라 실제 결제처다
     assert delta.session == "ses_1" and delta.vendor == "opencode"
     assert delta.plan == "api"
@@ -1311,7 +1312,7 @@ def test_gc_keeps_baseline_of_live_file(tmp: Path) -> None:
     _write_lines(path, [_codex_record(2000, 0, 0, 200, 0)], append=True)
     assert reader.poll() == 1, "baseline 을 버리면 한 턴이 통째로 유실된다"
     assert _vec(got[0]) == (1000, 0, 0, 100)
-    assert got[0].project == "myproj", "컨텍스트를 버리면 귀속이 깨진다"
+    assert got[0].project == "x/myproj", "컨텍스트를 버리면 귀속이 깨진다"
 
 
 def test_installer_leaves_foreign_hook(tmp: Path) -> None:
@@ -1378,7 +1379,7 @@ def test_hook_live_session(tmp: Path) -> None:
         assert len(files) == 1, files
         record = json.loads(files[0].read_text(encoding="utf-8"))
         assert record["service"] == "claude-code"
-        assert record["project"] == "tokenmeter"
+        assert record["project"] == "projects/tokenmeter"
         assert record["event"] == "SessionStart"
 
         # 중간 이벤트는 파일을 늘리지 않는다 (생존 신호)
@@ -1706,6 +1707,52 @@ def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
             os.environ["TOKENMETER_NO_DAEMON"] = original_no_daemon
 
 
+def test_project_key_separates_same_named_folders(_tmp: Path) -> None:
+    """leaf 이름만 쓰면 서로 다른 저장소의 `api` 두 개가 한 프로젝트로 합쳐진다."""
+    assert project_key("/Users/nilk/dev/oct7/api") == "oct7/api"
+    assert project_key("/Users/nilk/work/acme/api") == "acme/api"
+    assert project_key("/Users/nilk/dev/oct7/api") != project_key("/Users/nilk/work/acme/api")
+    assert project_key("/foo") == "foo", "상위가 루트면 leaf 만 쓴다"
+    assert project_key("/") == "" and project_key("") == "" and project_key(None) == ""
+
+    # 표시 이름은 집계 키와 같은 규칙 — 세션 목록과 프로젝트 패널이 어긋나지 않는다
+    assert project_label("", "/Users/nilk/dev/oct7/api") == "oct7/api"
+    assert project_label("oct7/api") == "oct7/api"
+    assert project_label("(unknown)") == UNKNOWN_PROJECT
+    assert project_label("") == UNKNOWN_PROJECT
+
+
+def test_missing_cwd_borrows_the_project_from_the_hook(tmp: Path) -> None:
+    """로그에 cwd 가 없는 서비스(Grok)도 (unknown) 으로 뭉치지 않는다."""
+    from tokenmeter import meter as meter_mod
+
+    live = tmp / "live"
+    live.mkdir(parents=True)
+    saved = meter_mod.LIVE_DIR
+    meter_mod.LIVE_DIR = live
+    try:
+        with _state_file(tmp):
+            meter = Meter(Config(services={}, settings={}))
+            meter.add_live(service="grok", session_id="sess-1", cwd="/Users/nilk/dev/oct7/api")
+
+            delta = TokenDelta(output_tokens=10, model="grok-4.6-build",
+                               service="grok", session="sess-1", project="")
+            meter.ingest(delta)
+
+            assert delta.project == "oct7/api", "훅이 남긴 라이브 파일에서 이어 붙인다"
+            assert "oct7/api" in meter.state["projects"]
+            assert "(unknown)" not in meter.state["projects"]
+
+            # 라이브 파일이 없으면 조용히 비워 둔다 (예전처럼 (unknown) 으로 집계)
+            orphan = TokenDelta(output_tokens=5, model="grok-4.6-build",
+                                service="grok", session="ghost", project="")
+            meter.ingest(orphan)
+            assert orphan.project == ""
+            assert "(unknown)" in meter.state["projects"]
+    finally:
+        meter_mod.LIVE_DIR = saved
+
+
 def test_live_session_lifecycle(tmp: Path) -> None:
     """Meter 의 라이브 세션 등록/조회/정리."""
     from tokenmeter import meter as meter_mod
@@ -1722,7 +1769,7 @@ def test_live_session_lifecycle(tmp: Path) -> None:
             assert len(files) == 1
             assert "/" not in files[0].name and " " not in files[0].name  # 파일명 안전화
             sessions = meter.live_sessions()
-            assert sessions[0]["project"] == "proj"
+            assert sessions[0]["project"] == "tmp/proj"
             assert meter.status()["live_count"] == 1
 
             assert meter.prune_live(24.0) == 0

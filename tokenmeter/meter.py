@@ -30,6 +30,7 @@ from .config import (
 )
 from .pricing import cache_savings, cost_usd
 from .rates import RATES_KEPT, active_seconds, add_rate, rate_key, rate_slot
+from .views import project_key
 
 STATE_VERSION = 2
 DAYS_KEPT = 60  # 일별 히스토리 보관 일수 (state.json 이 무한정 커지지 않게)
@@ -294,6 +295,7 @@ class Meter:
         self.read_only = read_only
         self._save_lock = threading.Lock()  # 워처 스레드 vs GUI 스레드가 tmp 를 겹쳐 쓰는 것 방지
         self._mtime = 0.0
+        self._project_cache: Dict[str, str] = {}  # 세션 키 → 훅이 알려준 프로젝트
         self.state: Dict[str, Any] = _default_state()
         self._load()
         if not read_only:
@@ -412,8 +414,30 @@ class Meter:
         except OSError:
             pass
 
+    def _resolve_project(self, delta: TokenDelta) -> None:
+        """로그에 cwd 가 없는 서비스는 훅이 남긴 라이브 파일에서 프로젝트를 가져온다.
+
+        Grok 처럼 레코드에 cwd 가 아예 없는 서비스는 사용량이 통째로 '(unknown)' 으로
+        뭉쳐 프로젝트 패널이 무의미해진다. 훅은 같은 sessionId 로 cwd 를 이미 적어
+        두었으므로 여기서 한 번 이어 붙인다. 델타가 들어오는 유일한 길목이라 이 한 곳만
+        고치면 projects / hour 버킷 / 세션 기록이 모두 같은 이름을 쓴다.
+        """
+        if delta.project or not delta.session:
+            return
+        key = f"{delta.service}/{delta.session}"
+        name = self._project_cache.get(key, "")
+        if not name:
+            # ponytail: 라이브 파일이 아직 없으면 매 델타마다 다시 본다. 훅이 세션 시작에
+            #           바로 쓰므로 실제로는 첫 몇 건뿐이다. 비어 있는 값은 캐시하지 않는다.
+            rec = _read_json(live_path(delta.service, delta.session)) or {}
+            name = str(rec.get("project") or "") or project_key(rec.get("cwd"))
+            if name:
+                self._project_cache[key] = name
+        delta.project = name
+
     def ingest(self, delta: TokenDelta) -> Dict[str, Any]:
         """델타를 반영하고 저장한다. 갱신된 누적 totals 를 돌려준다."""
+        self._resolve_project(delta)
         now = time.time()
         cost = delta.cost()
         saved = delta.saved()
@@ -605,7 +629,7 @@ class Meter:
         rec = {
             "service": service,
             "session_id": session_id,
-            "project": kw.get("project") or Path(cwd).name or "(unknown)",
+            "project": kw.get("project") or project_key(cwd) or "(unknown)",
             "cwd": cwd,
             "model": kw.get("model") or "",
             "started_at": float(kw.get("started_at") or time.time()),

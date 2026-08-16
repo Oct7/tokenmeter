@@ -28,9 +28,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 try:
     from tokenmeter.paths import data_dir, migrate_legacy
+    from tokenmeter.views import project_key
 except ImportError:  # 소스 체크아웃에서 이 파일을 직접 실행한 경우
     sys.path.insert(0, str(ROOT))
     from tokenmeter.paths import data_dir, migrate_legacy
+    from tokenmeter.views import project_key
 
 DATA_DIR = data_dir()
 LIVE_DIR = DATA_DIR / "live"
@@ -180,7 +182,7 @@ def _write_live(
     record = {
         "service": service,
         "session_id": session_id,
-        "project": Path(cwd).name if cwd else "",
+        "project": project_key(cwd),
         "cwd": cwd,
         "model": model or _pick(existing, "model"),
         "started_at": started_at or now,
