@@ -1749,6 +1749,18 @@ def test_missing_cwd_borrows_the_project_from_the_hook(tmp: Path) -> None:
             meter.ingest(orphan)
             assert orphan.project == ""
             assert "(unknown)" in meter.state["projects"]
+
+            # 옛 훅이 남긴 라이브 파일은 leaf 이름만 들고 있다 (내용은 이벤트가 와야 갱신된다).
+            # cwd 가 진실이므로 저장된 project 보다 cwd 를 먼저 봐야 옛 키로 새지 않는다.
+            stale = live / "grok__sess-2.json"
+            stale.write_text(json.dumps({
+                "service": "grok", "session_id": "sess-2",
+                "project": "api", "cwd": "/Users/nilk/work/acme/api",
+            }), encoding="utf-8")
+            fresh = TokenDelta(output_tokens=7, model="grok-4.6-build",
+                               service="grok", session="sess-2", project="")
+            meter.ingest(fresh)
+            assert fresh.project == "acme/api", fresh.project
     finally:
         meter_mod.LIVE_DIR = saved
 

@@ -430,7 +430,10 @@ class Meter:
             # ponytail: 라이브 파일이 아직 없으면 매 델타마다 다시 본다. 훅이 세션 시작에
             #           바로 쓰므로 실제로는 첫 몇 건뿐이다. 비어 있는 값은 캐시하지 않는다.
             rec = _read_json(live_path(delta.service, delta.session)) or {}
-            name = str(rec.get("project") or "") or project_key(rec.get("cwd"))
+            # cwd 를 먼저 본다. 라이브 파일의 project 는 훅이 마지막으로 이벤트를 받은
+            # 시점의 값이라 키 규칙이 바뀌면 낡은 채로 남는다 (내용은 이벤트가 와야 갱신).
+            # cwd 는 낡지 않으므로 project_label(project, cwd) 과 같은 우선순위를 쓴다.
+            name = project_key(rec.get("cwd")) or str(rec.get("project") or "")
             if name:
                 self._project_cache[key] = name
         delta.project = name
