@@ -785,7 +785,7 @@ def test_plan_and_vendor_resolution(tmp: Path) -> None:
 def test_endpoint_resolution_and_privacy(tmp: Path) -> None:
     """훅이 찍은 라우팅 환경 → 엔드포인트 판별, 그리고 업로드 시 익명화."""
     from tokenmeter import meter as meter_mod
-    from tokenmeter.endpoints import SELF_HOSTED, classify, resolve
+    from tokenmeter.endpoints import SELF_HOSTED, classify, provider_of, resolve
     from tokenmeter.hook import routing_env
     from tokenmeter.watcher import ServiceReader
 
@@ -834,6 +834,7 @@ def test_endpoint_resolution_and_privacy(tmp: Path) -> None:
     assert classify("https://llm.mycorp.com/v1") == SELF_HOSTED
     assert classify("https://api.anthropic.com") == "api.anthropic.com"
     assert classify("https://llm.mycorp.com/v1", ["llm.mycorp.com"]) == "llm.mycorp.com"
+    assert provider_of("https://api.deepseek.com/anthropic", "anthropic") == "api.deepseek.com"
 
     with _state_file(tmp):
         m = Meter(Config(services={}, settings={}))
@@ -1369,6 +1370,7 @@ def test_hook_live_session(tmp: Path) -> None:
     os.environ["TOKENMETER_NO_DAEMON"] = "1"  # 테스트가 데몬을 띄우면 안 된다
     os.environ["TOKENMETER_CWD"] = "/Users/dev/projects/tokenmeter"
     os.environ.pop("TOKENMETER_DISABLE", None)
+    os.environ.pop("GROK_SESSION_ID", None)
     try:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1388,6 +1390,19 @@ def test_hook_live_session(tmp: Path) -> None:
 
         assert hook_mod.main(["hook.py", "claude-code", "SessionEnd"]) == 0
         assert list(live.glob("*.json")) == []
+
+        # 셸에 남은 GROK_SESSION_ID 만으로는 Claude 세션을 가로채지 않는다
+        os.environ["GROK_SESSION_ID"] = "g-other"
+        assert hook_mod.main(["hook.py", "claude-code", "SessionStart", "claude-1"]) == 0
+        assert [p.name for p in live.glob("*.json")] == ["claude-code__claude-1.json"]
+        assert hook_mod.main(["hook.py", "claude-code", "SessionEnd", "claude-1"]) == 0
+
+        # Grok compat 훅이 같은 세션 id 로 오면 grok 라이브 파일로 옮긴다
+        os.environ["GROK_SESSION_ID"] = "g-1"
+        assert hook_mod.main(["hook.py", "claude-code", "SessionStart", "g-1"]) == 0
+        assert [p.name for p in live.glob("*.json")] == ["grok__g-1.json"]
+        assert hook_mod.main(["hook.py", "claude-code", "SessionEnd", "g-1"]) == 0
+        os.environ.pop("GROK_SESSION_ID")
 
         os.environ["TOKENMETER_DISABLE"] = "1"
         assert hook_mod.main(["hook.py", "claude-code", "SessionStart"]) == 0
@@ -1435,6 +1450,14 @@ def test_attention_views(tmp: Path) -> None:
     assert attention_counts(state, now) == {
         "check": 1, "working": 1, "waiting": 1, "risk": 1,
     }
+
+    stale_stop = {
+        "sessions": {"codex/stop": {"last_seen": now - 100, "totals": {}}},
+        "live": [{"service": "codex", "session_id": "stop", "event": "Stop",
+                  "attention": "check", "attention_at": now - 1}],
+    }
+    assert session_views(stale_stop, now)[0]["attention"] == "waiting"
+    assert attention_counts(stale_stop, now)["check"] == 0
 
 
 def test_public_snapshot_removes_private_live_fields(tmp: Path) -> None:
@@ -1665,7 +1688,8 @@ def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
     """훅은 정규화된 상태만 저장하고 Stop은 세션을 종료하지 않는다."""
     from tokenmeter import hook
 
-    assert hook.attention_signal("claude-code", "Stop", {}) == "check"
+    assert hook.attention_signal("claude-code", "Stop", {}) == "waiting"
+    assert hook.attention_signal("opencode", "session.idle", {}) == "waiting"
     assert hook.attention_signal(
         "claude-code", "Notification", {"notification_type": "auth_success"}
     ) == ""
@@ -1690,8 +1714,10 @@ def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
     }
     original_live = hook.LIVE_DIR
     original_no_daemon = os.environ.get("TOKENMETER_NO_DAEMON")
+    original_grok = os.environ.get("GROK_SESSION_ID")
     hook.LIVE_DIR = tmp
     os.environ["TOKENMETER_NO_DAEMON"] = "1"
+    os.environ.pop("GROK_SESSION_ID", None)
     try:
         live = hook.live_path("claude-code", "s")
         hook._write_live(live, "claude-code", "s", "/work/api", "SessionStart", "opus", "working")
@@ -1705,6 +1731,10 @@ def test_hook_attention_signal_does_not_store_content(tmp: Path) -> None:
             os.environ.pop("TOKENMETER_NO_DAEMON", None)
         else:
             os.environ["TOKENMETER_NO_DAEMON"] = original_no_daemon
+        if original_grok is None:
+            os.environ.pop("GROK_SESSION_ID", None)
+        else:
+            os.environ["GROK_SESSION_ID"] = original_grok
 
 
 def test_project_key_separates_same_named_folders(_tmp: Path) -> None:
@@ -1720,6 +1750,7 @@ def test_project_key_separates_same_named_folders(_tmp: Path) -> None:
     assert project_label("oct7/api") == "oct7/api"
     assert project_label("(unknown)") == UNKNOWN_PROJECT
     assert project_label("") == UNKNOWN_PROJECT
+    assert project_label(project_key(Path.home())) == "홈 폴더"
 
 
 def test_missing_cwd_borrows_the_project_from_the_hook(tmp: Path) -> None:
@@ -1761,6 +1792,7 @@ def test_missing_cwd_borrows_the_project_from_the_hook(tmp: Path) -> None:
                                service="grok", session="sess-2", project="")
             meter.ingest(fresh)
             assert fresh.project == "acme/api", fresh.project
+            assert meter.state["sessions"]["grok/sess-2"]["cwd"] == "/Users/nilk/work/acme/api"
     finally:
         meter_mod.LIVE_DIR = saved
 
@@ -1962,6 +1994,33 @@ def test_installer_upgrades_tokenpet_entry_from_moved_checkout(tmp: Path) -> Non
 
     entries = json.loads(path.read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"][0]["hooks"]
     assert len(entries) == 1, f"옮기기 전 죽은 훅이 남았다: {entries}"
+    assert entries[0]["command"] == installer.hook_command("claude-code", "UserPromptSubmit")
+
+
+def test_installer_upgrades_site_packages_entry_after_editable_reinstall(tmp: Path) -> None:
+    """editable 재설치로 사라진 site-packages 훅은 남기지 않고 제자리 교체한다."""
+    path = tmp / "settings.json"
+    stale_cmd = (
+        '"/tools/oct7-tokenmeter/bin/python" '
+        '"/tools/oct7-tokenmeter/lib/python3.14/site-packages/tokenmeter/hook.py" '
+        'claude-code UserPromptSubmit'
+    )
+    path.write_text(
+        json.dumps({"hooks": {"UserPromptSubmit": [
+            {"matcher": "", "hooks": [{"type": "command", "command": stale_cmd, "timeout": 5}]}
+        ]}}),
+        encoding="utf-8",
+    )
+    spec = ServiceSpec(
+        name="claude-code",
+        label="Claude Code",
+        install=InstallSpec(target="claude_json", path=path, events=["UserPromptSubmit"]),
+    )
+
+    installer.install(Config(services={"claude-code": spec}, settings={}))
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert len(entries) == 1, f"사라진 site-packages 훅을 남기고 덧붙였다: {entries}"
     assert entries[0]["command"] == installer.hook_command("claude-code", "UserPromptSubmit")
 
 
@@ -2173,9 +2232,14 @@ def test_runtime_paths_and_legacy_copy(tmp: Path) -> None:
         assert (legacy_config / "services.yaml").exists(), "이전 뒤에도 원본 설정은 남겨야 한다"
 
         (data_dir() / "state.json").write_text('{"version": 3}', encoding="utf-8")
+        stale_live = legacy_data / "live" / "old.json"
+        stale_live.parent.mkdir()
+        stale_live.write_text("{}", encoding="utf-8")
         migrate_legacy(legacy_root, legacy_config)
         assert (data_dir() / "state.json").read_text(encoding="utf-8") == '{"version": 3}', \
             "이미 시작한 새 상태를 옛 데이터로 덮어쓰면 안 된다"
+        assert not (data_dir() / "live" / "old.json").exists(), \
+            "종료되어 지운 옛 라이브 세션을 실행할 때마다 되살리면 안 된다"
     finally:
         os.environ.clear()
         os.environ.update(old_env)
@@ -2401,7 +2465,8 @@ def test_meter_records_active_output_rate(tmp: Path) -> None:
         meter = Meter(Config(services={}, settings={}))
         first = TokenDelta(
             output_tokens=80, session="s1", service="claude-code",
-            vendor="anthropic", model="opus-5", project="api",
+            vendor="anthropic", endpoint="https://api.deepseek.com/anthropic",
+            model="deepseek-v4-flash", project="api",
         )
         meter.ingest(first)
         rec = meter.state["sessions"]["claude-code/s1"]
@@ -2411,9 +2476,10 @@ def test_meter_records_active_output_rate(tmp: Path) -> None:
         rec["out_at"] = time.time() - 10
         meter.ingest(TokenDelta(
             output_tokens=200, session="s1", service="claude-code",
-            vendor="anthropic", model="opus-5", project="api",
+            vendor="anthropic", endpoint="https://api.deepseek.com/anthropic",
+            model="deepseek-v4-flash", project="api",
         ))
-        cell = meter.state["rate"]["m"]["anthropic/opus-5"]
+        cell = meter.state["rate"]["m"]["api.deepseek.com/deepseek-v4-flash"]
         assert cell[0] == 200
         assert 8.0 <= cell[1] <= 12.0
 
@@ -2421,21 +2487,24 @@ def test_meter_records_active_output_rate(tmp: Path) -> None:
         rec["out_at"] = time.time() - 45
         meter.ingest(TokenDelta(
             output_tokens=500, session="s1", service="claude-code",
-            vendor="anthropic", model="opus-5",
+            vendor="anthropic", endpoint="https://api.deepseek.com/anthropic",
+            model="deepseek-v4-flash",
         ))
-        assert meter.state["rate"]["m"]["anthropic/opus-5"][0] == 200, "끊긴 버스트는 안 넣는다"
+        assert meter.state["rate"]["m"]["api.deepseek.com/deepseek-v4-flash"][0] == 200, \
+            "끊긴 버스트는 안 넣는다"
 
         meter.state["rate"]["h"] = "2020-01-01T00:00"
         meter.ingest(TokenDelta(
             output_tokens=1, session="s1", service="claude-code",
-            vendor="anthropic", model="opus-5",
+            vendor="anthropic", endpoint="https://api.deepseek.com/anthropic",
+            model="deepseek-v4-flash",
         ))
         from tokenmeter import meter as meter_mod
 
         lines = meter_mod.RATES_FILE.read_text(encoding="utf-8").splitlines()
         done = json.loads(lines[0])
         assert done["h"] == "2020-01-01T00:00"
-        assert done["m"]["anthropic/opus-5"][0] == 200
+        assert done["m"]["api.deepseek.com/deepseek-v4-flash"][0] == 200
 
         meter.reset_stats()
         assert meter.state["rate"]["m"] == {}
@@ -2448,6 +2517,7 @@ def test_overlay_view_helpers(tmp: Path) -> None:
         SESSION_FILTERS, SESSION_FILTER_TITLES, check_reason, ctx_caption,
         filter_sessions, header_attention, health_note, money_caption, project_label,
     )
+    from tokenmeter.overlay import _price_values
 
     assert check_reason("PermissionRequest") == "권한"
     assert check_reason("question.asked") == "질문"
@@ -2461,6 +2531,16 @@ def test_overlay_view_helpers(tmp: Path) -> None:
     assert money_caption(True, 15.8599) == "환산 $15.86"
     assert money_caption(False, 15.8599) == "$15.86"
     assert money_caption(True, 0.0123) == "환산 $0.01"
+    assert _price_values("5, 0.5, 6.25, 25") == {
+        "input": 5.0, "cache_read": 0.5, "cache_write": 6.25, "output": 25.0,
+    }
+    for invalid in ("1, 2, 3", "1, 2, -3, 4", "1, 2, nan, 4"):
+        try:
+            _price_values(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"잘못된 단가를 받음: {invalid}")
 
     assert ctx_caption(0.95, True) == "높음"
     assert ctx_caption(0.4, True) == "40%"
@@ -2481,15 +2561,15 @@ def test_overlay_view_helpers(tmp: Path) -> None:
     assert header_attention(counts, "api-server") == "확인 2 · api-server"
     assert header_attention({"check": 0, "working": 1}, "") == ""
     assert SESSION_FILTERS == ("live", "archive", "all")
-    assert [SESSION_FILTER_TITLES[name] for name in SESSION_FILTERS] == ["LIVE", "ARCHIVE", "ALL"]
+    assert [SESSION_FILTER_TITLES[name] for name in SESSION_FILTERS] == ["실시간", "보관", "전체"]
 
     rows = [
-        {"attention": "check", "live": True, "activity_at": now - 7200, "project": "a"},
-        {"attention": "done", "live": False, "activity_at": now - 3599, "project": "b"},
-        {"attention": "done", "live": False, "activity_at": now - 3600, "project": "c"},
+        {"attention": "check", "live": True, "project": "a"},
+        {"attention": "done", "live": False, "project": "b"},
+        {"attention": "done", "live": False, "project": "c"},
     ]
-    assert [r["project"] for r in filter_sessions(rows, "live", now)] == ["a", "b"]
-    assert [r["project"] for r in filter_sessions(rows, "archive", now)] == ["c"]
+    assert [r["project"] for r in filter_sessions(rows, "live")] == ["a"]
+    assert [r["project"] for r in filter_sessions(rows, "archive")] == ["b", "c"]
     assert len(filter_sessions(rows, "all")) == 3
 
 
@@ -2587,6 +2667,15 @@ def test_quota_parses_provider_payloads(tmp: Path) -> None:
         "billingCycle": {"billingPeriodEnd": "2027-02-01T00:00:00Z"},
     }, now)
     assert ratio[0]["used"] == 0.25
+    current_grok = parse_grok({
+        "config": {
+            "currentPeriod": {"type": "MONTHLY", "start": now - 86400,
+                              "end": now + 29 * 86400},
+            "onDemandCap": {"val": 20000},
+            "onDemandUsed": {"val": 5000},
+        },
+    }, now)
+    assert current_grok[0]["used"] == 0.25 and current_grok[0]["label"] == "월간"
     exact_grok = parse_grok({
         "config": {"creditUsagePercent": 10, "currentPeriod": {
             "type": "WEEKLY", "start": now - 86400, "end": now + 6 * 86400,

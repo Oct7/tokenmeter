@@ -26,7 +26,8 @@ python3 /절대경로/tokenmeter/tokenmeter/hook.py <서비스> <이벤트>
 ```
 
 - `SessionStart` → 사용자 상태 디렉터리의 `live/<서비스>__<세션>.json` 기록 + 데몬 보장 기동
-- `SessionEnd` / `Stop` → 해당 라이브 파일 삭제
+- `Stop` / `session.idle` → 라이브 파일을 지우지 않고 상태를 `대기`로 바꾼다 (턴 완료)
+- `SessionEnd` / `session.deleted` → 해당 라이브 파일 삭제
 - 그 밖의 이벤트 → 라이브 파일 mtime 갱신 (생존 신호)
 
 지켜지는 규칙:
@@ -51,7 +52,10 @@ python3 /절대경로/tokenmeter/tokenmeter/hook.py <서비스> <이벤트>
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` | `hooks.SessionStart` / `hooks.SessionEnd` 배열에 그룹 1개 append |
 | Codex | `~/.codex/hooks.json` | 같은 스키마 |
+| Grok CLI | `~/.grok/hooks/tokenmeter.json` | Claude 와 같은 JSON 훅 파일 |
 | OpenCode | `~/.config/opencode/plugin/tokenmeter.js` | ESM 플러그인 파일 생성 (`tokenmeter:generated` 마커) |
+
+Grok 가 `~/.claude/settings.json` 훅을 compat 로 실행해도, 받은 세션 id 가 `GROK_SESSION_ID` 와 같을 때만 `grok` 라이브 파일로 옮깁니다. 셸에 변수가 남아 있는 것만으로는 Claude Code 세션을 가로채지 않습니다.
 
 ```json
 {

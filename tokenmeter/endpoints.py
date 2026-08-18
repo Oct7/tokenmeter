@@ -36,6 +36,7 @@ PUBLIC_HOSTS: Tuple[str, ...] = (
     "chatgpt.com",
     "generativelanguage.googleapis.com",
     "api.x.ai",
+    "cli-chat-proxy.grok.com",  # Grok CLI 구독 경로 (API 키 경로는 api.x.ai)
     "api.deepseek.com",
     "api.mistral.ai",
     "api.groq.com",
@@ -73,6 +74,11 @@ def host_of(url: str) -> str:
     if "://" not in text:
         text = "https://" + text
     return (urlsplit(text).hostname or "").lower()
+
+
+def provider_of(url: str, fallback: str = UNKNOWN) -> str:
+    """호출 URL 기준 프로바이더. URL을 모를 때만 기존 벤더를 폴백으로 쓴다."""
+    return host_of(url) or str(fallback or UNKNOWN).strip() or UNKNOWN
 
 
 def classify(url: str, public: Iterable[str] = ()) -> str:
@@ -160,6 +166,8 @@ def _demo() -> None:
     assert host_of("https://api.anthropic.com/v1/messages") == "api.anthropic.com"
     assert host_of("llm.example.test/v1") == "llm.example.test"
     assert host_of("") == "" and host_of("bedrock") == "bedrock"
+    assert provider_of("https://api.deepseek.com/anthropic", "anthropic") == "api.deepseek.com"
+    assert provider_of("", "anthropic") == "anthropic"
 
     # 공개 엔드포인트는 이름 그대로
     assert classify("https://api.anthropic.com") == "api.anthropic.com"

@@ -28,6 +28,7 @@ from .config import (
     ensure_dirs,
     load_config,
 )
+from .endpoints import provider_of
 from .pricing import cache_savings, cost_usd
 from .rates import RATES_KEPT, active_seconds, add_rate, rate_key, rate_slot
 from .views import project_key
@@ -72,6 +73,9 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
         token_at = _float(rec.get("last_seen"))
         signal = str((active or {}).get("attention") or "")
         signal_at = _float((active or {}).get("attention_at") or (active or {}).get("updated_at"))
+        event = (active or {}).get("event") or rec.get("event") or ""
+        if signal == "check" and event in {"Stop", "session.idle"}:
+            signal = "waiting"  # 예전 훅이 남긴 거짓 확인도 즉시 정상화한다.
         started_at = _float(rec.get("started_at") or (active or {}).get("started_at"))
         activity_at = max(
             token_at,
@@ -92,19 +96,26 @@ def session_views(state: Dict[str, Any], now: Optional[float] = None) -> List[Di
         if not separator:
             service, session_id = "?", key
         rec_service = rec.get("service") or (active or {}).get("service") or service
-        project = rec.get("project") or (active or {}).get("project") or "(unknown)"
+        cwd = (active or {}).get("cwd") or rec.get("cwd") or ""
+        project = (
+            project_key(cwd)
+            or (active or {}).get("project")
+            or rec.get("project")
+            or "(unknown)"
+        )
         model = rec.get("model") or (active or {}).get("model") or ""
+        endpoint = rec.get("endpoint") or (active or {}).get("endpoint") or ""
+        vendor = rec.get("vendor") or (active or {}).get("vendor") or ""
         totals = dict(rec.get("totals")) if isinstance(rec.get("totals"), dict) else {}
         sub_output = min(_int(totals.get("output_tokens")), _int(rec.get("sub_output_tokens")))
-        event = (active or {}).get("event") or rec.get("event") or ""
-        cwd = (active or {}).get("cwd") or rec.get("cwd") or ""
         rows.append({
             "key": key,
             "service": rec_service if isinstance(rec_service, str) else service,
             "session_id": (active or {}).get("session_id") or session_id,
             "project": project if isinstance(project, str) else "(unknown)",
             "model": model if isinstance(model, str) else "",
-            "effort": rec.get("effort") or "", "vendor": rec.get("vendor") or "",
+            "effort": rec.get("effort") or "", "vendor": vendor,
+            "endpoint": endpoint, "provider": provider_of(endpoint, vendor),
             "plan": rec.get("plan") or "unknown", "started_at": started_at,
             "last_seen": token_at, "activity_at": activity_at,
             "totals": totals,
@@ -145,6 +156,7 @@ class TokenDelta:
     vendor: str = ""  # anthropic | openai | ... (watcher 가 판정)
     plan: str = ""  # subscription | api | unknown
     endpoint: str = ""  # 통신 대상 URL 또는 라벨 (bedrock/vertex)
+    cwd: str = ""  # 프로젝트 키를 다시 계산할 수 있는 원본 작업 폴더
     effort: str = ""  # 추론 강도 (low | medium | high | xhigh …). 없는 서비스도 있다
     ctx_tokens: int = 0  # 이 턴이 끝난 시점의 컨텍스트 점유 (누적이 아니라 '지금')
     ctx_window: int = 0  # 그 모델의 컨텍스트 창. 0 이면 모름
@@ -204,7 +216,7 @@ def _default_state() -> Dict[str, Any]:
         # 진행 중인 한 시간만 여기 둔다. 끝나면 hours.jsonl 로 나간다 — 델타마다 이
         # 파일을 통째로 다시 쓰므로 60일치를 담으면 쓰기 비용이 그만큼 불어난다.
         "hour": {"h": "", "p": {}},  # {"h": 시간키, "p": {프로젝트: [토큰, 비용, 호출]}}
-        "rate": {"h": "", "m": {}},  # {"h": 15분키, "m": {벤더/모델: [출력토큰, 활성초, 횟수]}}
+        "rate": {"h": "", "m": {}},  # {"h": 15분키, "m": {프로바이더/모델: [출력토큰, 활성초, 횟수]}}
         "sessions": {},  # 최근 세션 기록 (session_history 개까지)
         "updated_at": now,
     }
@@ -430,6 +442,7 @@ class Meter:
             # ponytail: 라이브 파일이 아직 없으면 매 델타마다 다시 본다. 훅이 세션 시작에
             #           바로 쓰므로 실제로는 첫 몇 건뿐이다. 비어 있는 값은 캐시하지 않는다.
             rec = _read_json(live_path(delta.service, delta.session)) or {}
+            delta.cwd = str(rec.get("cwd") or "")
             # cwd 를 먼저 본다. 라이브 파일의 project 는 훅이 마지막으로 이벤트를 받은
             # 시점의 값이라 키 규칙이 바뀌면 낡은 채로 남는다 (내용은 이벤트가 와야 갱신).
             # cwd 는 낡지 않으므로 project_label(project, cwd) 과 같은 우선순위를 쓴다.
@@ -516,6 +529,7 @@ class Meter:
             rec = {
                 "service": delta.service,
                 "project": delta.project,
+                "cwd": delta.cwd,
                 "vendor": delta.vendor,
                 "plan": delta.plan,
                 "endpoint": delta.endpoint,
@@ -529,6 +543,8 @@ class Meter:
             # 세션 행의 모델/속도는 메인 에이전트를 뜻한다. 부모 sessionId 를 공유하는
             # 서브에이전트가 이 값을 덮으면 여러 모델의 합산 속도가 한 모델처럼 보인다.
             rec["model"] = delta.model
+            if delta.cwd:
+                rec["cwd"] = delta.cwd
             if delta.vendor:
                 rec["vendor"] = delta.vendor
             if delta.plan:
@@ -549,14 +565,15 @@ class Meter:
         if delta.output_tokens > 0 and not delta.subagent:
             # 모델 처리량은 메인 모델만 센다. 부모와 sessionId 를 공유하는 서브 스트림까지
             # 넣으면 마지막 서브 모델 옆에 여러 에이전트의 처리량이 합쳐져 보인다.
-            stream = rate_key(delta.vendor, delta.model)
+            provider = provider_of(delta.endpoint, delta.vendor)
+            stream = rate_key(provider, delta.model)
             previous = rec.get("out_at") if rec.get("out_model") == stream else 0.0
             gap = active_seconds(previous, now)
             rec["out_at"] = now       # 기존 state/도구가 읽는 마지막 메인 출력 시각
             rec["out_model"] = stream
             if gap > 0:
                 book = self.state.setdefault("rate", {"h": rate_slot(now), "m": {}})
-                add_rate(book.setdefault("m", {}), delta.vendor, delta.model,
+                add_rate(book.setdefault("m", {}), provider, delta.model,
                          delta.output_tokens, gap)
         _accumulate(rec["totals"], delta, cost, saved)
         seen = rec.setdefault("seen", [])

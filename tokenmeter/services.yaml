@@ -240,10 +240,13 @@ services:
       path: ~/.grok/models_cache.json
       key: origin
       default: https://api.x.ai/v1
-    # Grok CLI 는 ~/.claude/settings.json 의 훅을 그대로 실행한다(compat.claude).
-    # 따로 설치할 훅 파일이 없어 로그만 본다.
+    # Grok CLI 는 ~/.grok/hooks/*.json 을 훅 소스로 읽는다 (Claude settings 와 같은 형식).
+    # compat 으로 ~/.claude/settings.json 도 읽지만 그 엔트리는 서비스명이 claude-code 라
+    # grok 세션이 남의 이름으로 기록된다 — 자기 훅을 따로 깔아야 프로젝트가 붙는다.
     install:
-      target: none
+      target: claude_json
+      path: ~/.grok/hooks/tokenmeter.json
+      events: [SessionStart, UserPromptSubmit, Notification, Stop, SessionEnd]
 # ── 새 서비스 추가 예시 ──────────────────────────────────────────────────
 #  gemini-cli:
 #    enabled: true

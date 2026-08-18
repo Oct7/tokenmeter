@@ -357,6 +357,7 @@ class ServiceReader:
             vendor=vendor,
             plan=self.plan,
             endpoint=self.endpoint_for(session, vendor),
+            cwd=cwd,
             effort=learned("effort"),
             ctx_tokens=ctx_now,
             ctx_window=ctx_win,

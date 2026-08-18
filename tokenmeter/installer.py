@@ -33,6 +33,7 @@ MARKER = f'"{HOOK_SCRIPT}"'  # 우리 엔트리 식별자 (부분 경로가 아�
 LEGACY_MARKERS = (
     f'"{ROOT / "src" / "hook.py"}"',
     f'"{ROOT / "tokenpet" / "hook.py"}"',
+    '/site-packages/tokenmeter/hook.py"',
     '/tokenpet/hook.py"',
     '\\tokenpet\\hook.py"',
 )

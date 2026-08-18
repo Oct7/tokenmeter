@@ -44,9 +44,10 @@ TOGGLE_FILE = DATA_DIR / "toggle.json"  # config.py 와 같은 파일 (여기선
 # 세션 종료로 간주해 라이브 파일을 지우는 이벤트
 STOP_EVENTS = {"SessionEnd", "session.deleted"}
 CHECK_EVENTS = {
-    "PermissionRequest", "Stop", "permission.asked", "permission.v2.asked",
-    "question.asked", "question.v2.asked", "session.idle",
+    "PermissionRequest", "permission.asked", "permission.v2.asked",
+    "question.asked", "question.v2.asked",
 }
+WAIT_EVENTS = {"Stop", "session.idle"}
 WORK_EVENTS = {
     "SessionStart", "UserPromptSubmit", "session.created", "permission.replied",
     "permission.v2.replied", "question.replied", "question.v2.replied",
@@ -144,17 +145,37 @@ def attention_signal(service: str, event: str, payload: dict) -> str:
             return "working"
     if event in CHECK_EVENTS:
         return "check"
+    if event in WAIT_EVENTS:
+        return "waiting"
     return "working" if event in WORK_EVENTS else ""
+
+
+def _explicit_session_id(payload: dict, argv_session_id: str = "") -> str:
+    """훅이 실제로 받은 세션 id. cwd 해시 폴백은 넣지 않는다."""
+    return argv_session_id or _pick(payload, "session_id", "sessionId", "id")
 
 
 def _resolve_session_id(payload: dict, cwd: str, argv_session_id: str = "") -> str:
     """세션 식별자. 훅이 아무 정보도 못 받으면 cwd 해시로 대체한다."""
-    sid = argv_session_id or _pick(payload, "session_id", "sessionId", "id")
+    sid = _explicit_session_id(payload, argv_session_id)
     if sid:
         return sid
     # ponytail: cwd 해시 폴백 — OpenCode 플러그인처럼 세션 id 를 못 주는 경우용.
     #           같은 디렉토리의 동시 세션은 한 파일을 공유한다. 필요해지면 ppid 를 섞을 것.
     return "cwd-" + hashlib.md5(cwd.encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _service_for_hook(service: str, session_id: str) -> str:
+    """Claude-compat 훅이 진짜 Grok 세션을 대행할 때만 서비스명을 고친다.
+
+    Grok CLI 는 ~/.claude/settings.json 훅도 실행한다. 인자만 믿으면 grok
+    세션이 claude-code 라이브 파일로 남는다. 다만 GROK_SESSION_ID 가 셸에
+    남아 있는 것만으로는 Claude Code 세션을 가로채지 않는다.
+    """
+    if service != "claude-code" or not session_id:
+        return service
+    grok_sid = (os.environ.get("GROK_SESSION_ID") or "").strip()
+    return "grok" if grok_sid and session_id == grok_sid else service
 
 
 def live_path(service: str, session_id: str) -> Path:
@@ -311,13 +332,13 @@ def main(argv: list[str]) -> int:
 
     service = argv[1] if len(argv) > 1 else "unknown"
     event = argv[2] if len(argv) > 2 else ""
-    if is_off(service):
-        return 0
-
     payload = _read_payload()
     event = event or _pick(payload, "hook_event_name") or "SessionStart"
     cwd = _resolve_cwd(payload)
     session_id = _resolve_session_id(payload, cwd, argv[3] if len(argv) > 3 else "")
+    service = _service_for_hook(service, session_id)
+    if is_off(service):
+        return 0
 
     if not os.environ.get("TOKENMETER_HOME"):
         migrate_legacy(ROOT, Path.home() / ".config" / "tokenpet")
