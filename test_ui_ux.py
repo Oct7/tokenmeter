@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
 import tempfile
@@ -26,13 +27,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QTimer, Qt
-from PyQt6.QtGui import QFont, QFontMetricsF, QMouseEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtGui import QFont, QFontMetricsF, QMouseEvent, QWheelEvent
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QStyle
 
 from tokenmeter import overlay
 from tokenmeter.config import Config
 from tokenmeter.meter import Meter, TokenDelta, session_views
-from tokenmeter.overlay import CARD_H, CHIP_H, FOOT_H, PAD, MeterWindow
+from tokenmeter.overlay import CHIP_H, FOOT_H, PAD, MeterWindow
+from tokenmeter.rates import rate_slot
 from tokenmeter.views import UNKNOWN_PROJECT, ctx_status_caption, project_key
 
 
@@ -211,6 +214,36 @@ def test_tokenmeter_controls_are_visible_before_optional_search(_tmp: Path) -> N
         assert window.isVisible() and not window.palette_open
 
 
+def test_overlay_submenus_switch_without_hover_delay(_tmp: Path) -> None:
+    class _CaptureMenu(QMenu):
+        opened: List[QMenu] = []
+
+        def exec(self, *_args: Any) -> None:
+            self.opened.append(self)
+
+    saved_menu = overlay.QMenu
+    try:
+        overlay.QMenu = _CaptureMenu
+        with _window() as window:
+            window._popup_menu()
+            root = _CaptureMenu.opened[-1]
+            menus = [root] + [action.menu() for action in root.actions() if action.menu()]
+            assert len(menus) > 2, "실제 2단 옵션 메뉴를 검사해야 한다"
+            assert all(
+                menu.style().styleHint(QStyle.StyleHint.SH_Menu_SubMenuPopupDelay) == 0
+                for menu in menus
+            ), "즉시 전환 스타일이 실제 메뉴에 적용되지 않았다"
+            root.popup(QPoint(100, 100))
+            _app().processEvents()
+            for submenu in menus[1:3]:
+                QTest.mouseMove(root, root.actionGeometry(submenu.menuAction()).center())
+                _app().processEvents()
+                assert submenu.isVisible(), "다른 옵션의 다음 창이 hover 즉시 열리지 않았다"
+            root.close()
+    finally:
+        overlay.QMenu = saved_menu
+
+
 def test_classic_meter_visual_tokens_and_square_surface(_tmp: Path) -> None:
     """v0.3 계기판의 고대비 색과 평평한 사각 표면을 기본 디자인으로 고정한다."""
     dark = overlay.THEMES["dark"]
@@ -263,7 +296,6 @@ def test_light_reduced_effects_keep_same_render_path(_tmp: Path) -> None:
 def test_animation_timer_slows_when_surface_is_idle(_tmp: Path) -> None:
     with _window() as window:
         window.rate = window.gauge = window.pulse = 0.0
-        window.card = None
         window._tick()
         assert window._timer.interval() == 250
 
@@ -272,7 +304,7 @@ def test_animation_timer_slows_when_surface_is_idle(_tmp: Path) -> None:
         assert window._timer.interval() == window._active_interval
 
 
-def test_mini_meter_keeps_rate_unit_and_visible_gauge_during_attention(_tmp: Path) -> None:
+def test_mini_meter_keeps_rate_unit_without_attention_shortcut(_tmp: Path) -> None:
     with _window() as window:
         window.status = _sessions()
         window.mini = True
@@ -295,7 +327,7 @@ def test_mini_meter_keeps_rate_unit_and_visible_gauge_during_attention(_tmp: Pat
             assert metrics.horizontalAdvance(caption) <= available, (
                 caption, metrics.horizontalAdvance(caption), available,
             )
-        assert window._controls["attention"].accessibleName() == "확인 세션을 맨 위로 전체 세션 보기"
+        assert "attention" not in window._hit
 
 
 def test_manual_sync_does_not_block_gui_thread(_tmp: Path) -> None:
@@ -334,14 +366,12 @@ def test_state_read_error_keeps_last_good_screen(_tmp: Path) -> None:
     with _window() as window:
         last_good = _sessions(live=True)
         window.status = last_good
-        window._live_keys = {"svc/check", "svc/older", "svc/newer"}
         window.meter = _BrokenMeter()
 
         window._refresh_state()
 
         assert window.status is last_good
         assert window.state_error.startswith("상태 읽기 실패")
-        assert window.card is None, "일시적인 읽기 실패를 세션 종료로 오인했다"
 
 
 def test_close_button_hides_without_quitting_application(_tmp: Path) -> None:
@@ -410,6 +440,38 @@ def test_reset_stats_waits_for_explicit_confirmation(_tmp: Path) -> None:
         assert meter.reset_calls == 1
 
 
+def test_user_can_enter_model_prices_from_overlay(_tmp: Path) -> None:
+    from tokenmeter import pricing
+
+    class _Dialogs:
+        @staticmethod
+        def getItem(*_args: Any) -> tuple[str, bool]:
+            return "gpt-5.6-sol", True
+
+        @staticmethod
+        def getText(*_args: Any) -> tuple[str, bool]:
+            return "4, 0.4, 4, 24", True
+
+    saved_dialog = overlay.QInputDialog
+    saved_path = pricing.USER_PRICES
+    saved_cache = pricing._OVER, pricing._OVER_MTIME
+    try:
+        overlay.QInputDialog = _Dialogs
+        pricing.USER_PRICES = _tmp / "prices.json"
+        with _window() as window:
+            window.status = {"models": {"gpt-5.6-sol": {}}}
+            window._edit_price()
+            saved = json.loads(pricing.USER_PRICES.read_text(encoding="utf-8"))
+            assert saved["gpt-5.6-sol"] == {
+                "input": 4.0, "cache_read": 0.4, "cache_write": 4.0, "output": 24.0,
+            }
+            assert "다음 측정부터 적용" in window._feedback
+    finally:
+        overlay.QInputDialog = saved_dialog
+        pricing.USER_PRICES = saved_path
+        pricing._OVER, pricing._OVER_MTIME = saved_cache
+
+
 def test_resize_clamps_window_inside_available_geometry(_tmp: Path) -> None:
     with _window() as window:
         area = _app().primaryScreen().availableGeometry()
@@ -455,25 +517,6 @@ def test_double_click_does_not_change_panel_or_scope(_tmp: Path) -> None:
         assert (window.panel, window.scope) == original
 
 
-def test_end_card_resizes_even_when_session_row_count_is_unchanged(_tmp: Path) -> None:
-    with _window() as window:
-        window.panel = "sessions"
-        window.session_filter = "all"
-        window.status = _sessions(live=True)
-        window._track_ended()
-        window._rebuild_rows()
-        window.resize(*window._size())
-        before_rows, before_height = window._row_count(), window.height()
-
-        window.status = _sessions(live=False)
-        window._track_ended()
-        window._rebuild_rows()
-
-        assert window.card is not None
-        assert window._row_count() == before_rows
-        assert window.height() == window._size()[1] == before_height + int(CARD_H * window.scale)
-
-
 def test_quota_chip_resizes_even_when_panel_row_count_is_unchanged(_tmp: Path) -> None:
     with _window() as window:
         window.panel = "sessions"
@@ -497,6 +540,7 @@ def test_projects_show_only_measured_tokens_in_latest_activity_order(_tmp: Path)
     with _window() as window:
         window.status = {"projects": {
             "old": {"last_seen": 100.0, "totals": {"output_tokens": 20}},
+            "shop/old": {"last_seen": 150.0, "totals": {"output_tokens": 5}},
             "new": {"last_seen": 200.0, "totals": {
                 "input_tokens": 1, "cache_read": 2, "cache_write": 3, "output_tokens": 4,
             }},
@@ -505,10 +549,38 @@ def test_projects_show_only_measured_tokens_in_latest_activity_order(_tmp: Path)
         window.panel = "projects"
         rows, note = window._build_rows()
 
-        assert rows == [("new", 10, 200.0), ("old", 20, 100.0)]
-        assert "측정 30 토큰" in note
+        assert rows == [("new", 10, 200.0), ("shop/old", 25, 150.0)]
+        assert "프로젝트 2개" in note and "측정 35 토큰" in note
         window._rebuild_rows()
         assert not window.grab().isNull()
+
+
+def test_wheel_resizes_window_except_over_a_list_row(_tmp: Path) -> None:
+    with _window() as window:
+        window.status = _sessions()
+        window._rebuild_rows()
+        window.grab()
+        before = window.scale
+        point = QPointF(4, 4)
+        event = QWheelEvent(
+            point, QPointF(window.mapToGlobal(QPoint(4, 4))), QPoint(), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate, False,
+        )
+        QApplication.sendEvent(window, event)
+        assert window.scale > before
+
+        window.scroll = 1
+        row = window._hit["row:0"]
+        row_point = QPointF(row[0] + 2, row[1] + 2)
+        event = QWheelEvent(
+            row_point, QPointF(window.mapToGlobal(row_point.toPoint())), QPoint(), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate, False,
+        )
+        scale = window.scale
+        QApplication.sendEvent(window, event)
+        assert window.scale == scale and window.scroll == 0
 
 
 def test_quota_row_sets_and_persists_representative_window(_tmp: Path) -> None:
@@ -570,7 +642,7 @@ def _quota_windows() -> Dict[str, Any]:
 
 
 def test_simple_mode_keeps_only_the_meter(_tmp: Path) -> None:
-    """S 는 계기판 그 자체 — 입출력 4칸·FULL 캡션·한도 칩은 M 부터 붙는다."""
+    """S 는 출력 속도와 게이지만 남긴다."""
     with _window() as window:
         window.status = _sessions()
         window.quota = _quota_windows()
@@ -586,27 +658,22 @@ def test_simple_mode_keeps_only_the_meter(_tmp: Path) -> None:
         assert window._chip_h() == 0.0, "S 에는 한도 칩이 없다"
         assert window.height() < medium
         assert window.height() == int((PAD * 2 + overlay.METER_H_S + FOOT_H) * window.scale)
-        # 접혀 있어도 '얼마 썼고 몇 개가 기다리나' 는 답한다
-        assert "attention" in window._hit
+        assert "attention" not in window._hit
         assert not any(name.startswith("panel:") for name in window._hit)
 
 
-def test_meter_digits_stay_put_when_the_window_widens(_tmp: Path) -> None:
-    """큰 숫자의 오른쪽 끝은 S/M/L 어디서나 같은 자리다 — 곁눈질로 읽는 계기판이라서."""
-    anchors: Dict[str, float] = {}
-    widths: Dict[str, int] = {}
+def test_output_speed_bezel_fills_available_width(_tmp: Path) -> None:
     with _window() as window:
         window.status = _sessions()
         for mode in ("S", "M", "L"):
             window._set_mode(mode)
-            window.grab()
+            image = window.grab().toImage()
             s = window.scale
-            inner = window.width() - 2 * PAD * s
-            box_w = max(120 * s, inner - overlay.SIDE_W * s - overlay.SIDE_GAP * s)
-            anchors[mode] = PAD * s + min(box_w, overlay.DIGIT_W * s) - 8 * s
-            widths[mode] = window.width()
-        assert len(set(round(v, 3) for v in anchors.values())) == 1, anchors
-        assert widths["L"] > widths["M"], "L 은 실제로 더 넓은 창이다"
+            edge = image.pixelColor(
+                image.width() - int(PAD * s) - 2,
+                int((PAD + 27) * s) + 1,
+            )
+            assert edge.blue() > edge.red(), f"{mode} 출력 속도 베젤이 오른쪽 끝까지 안 찼다"
 
 
 def test_mode_buttons_do_not_share_hit_areas(_tmp: Path) -> None:
@@ -728,6 +795,35 @@ def test_project_name_is_the_same_in_sessions_and_projects(_tmp: Path) -> None:
         assert session_rows[0][2] == key
         assert project_rows[0][0] == key, project_rows
         assert project_rows[1][0] == UNKNOWN_PROJECT, "(unknown) 은 사람 말로 보여준다"
+
+
+def test_live_session_uses_current_cwd_and_url_provider(_tmp: Path) -> None:
+    """저장된 옛 프로젝트/프로토콜보다 현재 cwd/호출 URL이 화면의 진실이다."""
+    now = time.time()
+    with _window() as window:
+        window.status = {
+            "sessions": {"claude-code/s": {
+                "project": "INF", "model": "deepseek-v4-flash", "vendor": "anthropic",
+                "endpoint": "https://api.deepseek.com/anthropic", "last_seen": now,
+                "totals": {"output_tokens": 1},
+            }},
+            "live": [{
+                "service": "claude-code", "session_id": "s",
+                "cwd": "/Users/nilk/dev/BROZ_Projects/INF/infmap",
+                "attention": "working", "attention_at": now,
+            }],
+            "live_count": 1,
+        }
+        window.session_filter = "live"
+        row = window._session_rows()[0][0]
+        assert row[2] == "INF/infmap"
+        assert row[6] == "api.deepseek.com"
+
+        window.status["rate"] = {
+            "h": rate_slot(now),
+            "m": {"anthropic/deepseek-v4-flash": [100, 2.0, 1]},
+        }
+        assert window._rate_view().rows[0].vendor == "api.deepseek.com"
 
 
 def test_saved_panel_falls_back_when_the_mode_hides_it(_tmp: Path) -> None:

@@ -40,7 +40,10 @@ def _copy_missing(source: Path, destination: Path) -> None:
 def migrate_legacy(legacy_root: Path, legacy_config: Path) -> None:
     """옛 체크아웃 데이터와 설정에서 없는 파일만 복사한다. 원본은 남긴다."""
     try:
-        _copy_missing(legacy_root / "data", data_dir())
-        _copy_missing(legacy_config, config_dir())
+        state, config = data_dir(), config_dir()
+        if not state.exists():
+            _copy_missing(legacy_root / "data", state)
+        if not config.exists():
+            _copy_missing(legacy_config, config)
     except OSError:
         pass

@@ -308,6 +308,9 @@ def parse_grok(data: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
         if spent is None:
             spent = _cents_val(data.get("onDemandUsed"))
             limit = limit or _cents_val(data.get("onDemandCap"))
+        if spent is None and isinstance(cfg, dict):
+            spent = _cents_val(cfg.get("onDemandUsed"))
+            limit = limit or _cents_val(cfg.get("onDemandCap"))
         if limit and limit > 0 and spent is not None:
             used = spent / limit
             percent = False

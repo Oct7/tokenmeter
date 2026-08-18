@@ -6,7 +6,6 @@ Qt 를 모른다. 상태 dict 와 숫자만 받아 화면에 쓸 문자열을 �
 from __future__ import annotations
 
 from pathlib import Path
-import time
 from typing import Any, Dict, List
 
 CHECK_REASONS = {
@@ -21,8 +20,7 @@ CHECK_REASONS = {
 }
 
 SESSION_FILTERS = ("live", "archive", "all")
-SESSION_FILTER_TITLES = {"live": "LIVE", "archive": "ARCHIVE", "all": "ALL"}
-SESSION_ARCHIVE_SECONDS = 3600.0
+SESSION_FILTER_TITLES = {"live": "실시간", "archive": "보관", "all": "전체"}
 UNKNOWN_PROJECT = "폴더 미상"
 LEGACY_UNKNOWN = "(unknown)"
 
@@ -55,7 +53,11 @@ def project_key(cwd: Any) -> str:
 def project_label(project: Any, cwd: Any = "") -> str:
     """화면에 쓸 프로젝트 이름. cwd 를 알면 그걸로, 모르면 저장된 키를 그대로 쓴다."""
     name = project_key(cwd) or str(project or "").strip()
-    return UNKNOWN_PROJECT if name in ("", LEGACY_UNKNOWN) else name
+    if name in ("", LEGACY_UNKNOWN):
+        return UNKNOWN_PROJECT
+    if name == project_key(Path.home()):
+        return "홈 폴더"
+    return name
 
 
 def money_caption(approx: bool, amount: Any) -> str:
@@ -120,24 +122,13 @@ def header_attention(counts: Dict[str, Any], project: str) -> str:
 def filter_sessions(
     rows: List[Dict[str, Any]], mode: str, now: float | None = None,
 ) -> List[Dict[str, Any]]:
-    """세션을 최근 활동 1시간 기준 LIVE / ARCHIVE 두 그룹으로 나눈다."""
+    """실시간은 훅이 살아 있는 세션만, 보관은 종료된 세션만 보여준다."""
     if mode == "all":
         return list(rows)
-    now = time.time() if now is None else now
-
-    def recent(row: Dict[str, Any]) -> bool:
-        if row.get("live"):
-            return True  # 장시간 실행 중인 실제 라이브 세션은 활동 간격과 무관하게 LIVE다.
-        try:
-            activity = float(row.get("activity_at") or row.get("last_seen") or 0)
-        except (TypeError, ValueError):
-            activity = 0.0
-        return activity > 0 and now - activity < SESSION_ARCHIVE_SECONDS
-
     if mode == "archive":
-        return [row for row in rows if not recent(row)]
+        return [row for row in rows if not row.get("live")]
     if mode == "live":
-        return [row for row in rows if recent(row)]
+        return [row for row in rows if row.get("live")]
     return list(rows)
 
 

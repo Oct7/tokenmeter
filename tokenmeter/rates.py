@@ -1,4 +1,4 @@
-"""벤더·모델별 활성 출력 tok/s 시계열 (Application).
+"""프로바이더·모델별 활성 출력 tok/s 시계열 (Application).
 
 작업 중인 구간(연속 출력 유입)만 잰다. 벽시계가 아니라 활성 초로 나눈다.
 Qt 를 모른다 — 집계만 하고 그리는 일은 overlay 가 한다.
@@ -21,7 +21,7 @@ RATE_SPAN_TITLES = {"1h": "1시간", "4h": "4시간", "1d": "1일", "7d": "7일"
 RATE_WINDOWS = {"1h": 3600, "4h": 4 * 3600, "1d": 24 * 3600, "7d": 7 * 24 * 3600}
 RATE_BAR = {"1h": RATE_SLOT_SECONDS, "4h": RATE_SLOT_SECONDS, "1d": 3600, "7d": 24 * 3600}
 
-RateBucket = Tuple[str, Dict[str, Any]]  # (슬롯키, {vendor/model: [tokens, active_sec, bursts]})
+RateBucket = Tuple[str, Dict[str, Any]]  # (슬롯키, {provider/model: [tokens, active_sec, bursts]})
 
 
 @dataclass
