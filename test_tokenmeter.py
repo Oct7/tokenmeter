@@ -2024,6 +2024,39 @@ def test_installer_upgrades_site_packages_entry_after_editable_reinstall(tmp: Pa
     assert entries[0]["command"] == installer.hook_command("claude-code", "UserPromptSubmit")
 
 
+def test_installer_collapses_checkout_and_site_packages_hooks(tmp: Path) -> None:
+    """체크아웃 훅과 설치본 훅이 같이 있으면 하나만 남긴다."""
+    path = tmp / "settings.json"
+    checkout = (
+        '"/tools/oct7-tokenmeter/bin/python" '
+        '"/Users/nilk/dev/oct7/token-pet/tokenmeter/hook.py" '
+        'claude-code UserPromptSubmit'
+    )
+    installed = (
+        '"/tools/oct7-tokenmeter/bin/python" '
+        '"/tools/oct7-tokenmeter/lib/python3.14/site-packages/tokenmeter/hook.py" '
+        'claude-code UserPromptSubmit'
+    )
+    path.write_text(
+        json.dumps({"hooks": {"UserPromptSubmit": [
+            {"matcher": "", "hooks": [{"type": "command", "command": checkout, "timeout": 5}]},
+            {"matcher": "", "hooks": [{"type": "command", "command": installed, "timeout": 5}]},
+        ]}}),
+        encoding="utf-8",
+    )
+    spec = ServiceSpec(
+        name="claude-code",
+        label="Claude Code",
+        install=InstallSpec(target="claude_json", path=path, events=["UserPromptSubmit"]),
+    )
+
+    installer.install(Config(services={"claude-code": spec}, settings={}))
+
+    groups = json.loads(path.read_text(encoding="utf-8"))["hooks"]["UserPromptSubmit"]
+    commands = [h["command"] for g in groups for h in g.get("hooks") or []]
+    assert commands == [installer.hook_command("claude-code", "UserPromptSubmit")], commands
+
+
 # ── 컨텍스트 · 캐시 절감 · 단가 오버라이드 · 유휴 알림 ──────────────────────
 
 

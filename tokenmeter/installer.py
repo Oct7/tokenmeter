@@ -33,7 +33,8 @@ MARKER = f'"{HOOK_SCRIPT}"'  # 우리 엔트리 식별자 (부분 경로가 아�
 LEGACY_MARKERS = (
     f'"{ROOT / "src" / "hook.py"}"',
     f'"{ROOT / "tokenpet" / "hook.py"}"',
-    '/site-packages/tokenmeter/hook.py"',
+    '/tokenmeter/hook.py"',
+    '\\tokenmeter\\hook.py"',
     '/tokenpet/hook.py"',
     '\\tokenpet\\hook.py"',
 )
@@ -168,6 +169,7 @@ def _edit_claude_json(data: Dict[str, Any], service: str, events: List[str], rem
 
         wanted = hook_command(service, event)
         found = False
+        kept = False
         for group in list(groups):
             entries = group.get("hooks") if isinstance(group, dict) else None
             if not isinstance(entries, list):
@@ -176,18 +178,21 @@ def _edit_claude_json(data: Dict[str, Any], service: str, events: List[str], rem
             if not ours:
                 continue
             found = True
-            if remove:
+            if remove or kept:
                 for entry in ours:
                     entries.remove(entry)
                 changed = True
                 if not entries:
                     # 우리가 비운 그룹만 제거한다 (원래 비어 있던 남의 그룹은 손대지 않음)
                     groups.remove(group)
-            else:
-                for entry in ours:
-                    if entry.get("command") != wanted:
-                        entry["command"] = wanted
-                        changed = True
+                continue
+            for entry in ours[1:]:
+                entries.remove(entry)
+                changed = True
+            if ours[0].get("command") != wanted:
+                ours[0]["command"] = wanted
+                changed = True
+            kept = True
 
         if remove:
             # 우리가 비운 이벤트만 정리한다. 원래 비어 있던 남의 이벤트는 그대로 둔다.
